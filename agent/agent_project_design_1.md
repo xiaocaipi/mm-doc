@@ -88,8 +88,8 @@ graph TB
 | **后端** | Python | 3.10+ | 运行环境 |
 | | FastAPI | 0.100+ | API 框架 |
 | | Claude Agent SDK | 0.1.80+ | Agent 核心 |
-| **数据层** | MySQL | 8.0+ | Session/用户/配置 元数据 |
-| | Redis | 7+ | Session 内容缓存 |
+| **数据层** | PostgreSQL | 15+ | 主数据库 |
+| | Redis | 7+ | Session 缓存 |
 | **部署** | Docker | - | 容器化 |
 
 ---
@@ -111,7 +111,7 @@ graph TB
 |------|----------|
 | FastAPI | 高性能、原生 async、自动 API 文档 |
 | Claude Agent SDK | 官方 SDK、完整 Agent 能力 |
-| MySQL | 关系型数据、用户/配置存储 |
+| PostgreSQL | 关系型数据、用户/配置存储 |
 | Redis | Session 缓存、实时状态 |
 
 ### 2.3 Claude Agent SDK 优势
@@ -176,7 +176,7 @@ flowchart TB
     end
 
     subgraph DATA["数据层"]
-        PG["MySQL<br/>用户/配置"]
+        PG["PostgreSQL<br/>用户/配置"]
         REDIS["Redis<br/>Session 缓存"]
         FILE["文件存储<br/>Session 内容"]
     end
@@ -387,10 +387,10 @@ class SessionContent(BaseModel):
 
 | 数据类型 | 存储位置 | 原因 |
 |----------|----------|------|
-| Session 元数据 | MySQL | 查询、过滤、统计 |
+| Session 元数据 | PostgreSQL | 查询、过滤、统计 |
 | Session 内容（活跃） | Redis | 快速访问、流式写入 |
 | Session 内容（历史） | 文件系统/对象存储 | 大数据、持久化 |
-| Session 累计统计 | MySQL | 成本追踪、分析 |
+| Session 累计统计 | PostgreSQL | 成本追踪、分析 |
 
 ### 5.3 Session API
 
@@ -1294,522 +1294,134 @@ agent_platform/
 
 ---
 
-## 12. 数据库设计（MySQL）
+## 12. 数据库设计
 
-### 12.1 DB Session 与 SDK Session 关联机制
-
-**两种 Session 的区别：**
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Session 架构说明                                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  DB Session (MySQL)                     SDK Session (SessionStore)          │
-│  ┌──────────────────────┐              ┌──────────────────────────┐         │
-│  │ 业务层面的"对话"      │              │ Agent 内部的对话上下文    │         │
-│  │                      │              │                          │         │
-│  │ - session_id (UUID)  │─────────────→│ - session_id (同一个ID)   │         │
-│  │ - user_id            │   关联标识   │ - messages (消息列表)     │         │
-│  │ - title              │              │ - context (上下文)        │         │
-│  │ - model              │              │ - metadata               │         │
-│  │ - agent_type         │              │                          │         │
-│  │ - created_at         │              │ 存储位置:                 │         │
-│  │ - token统计          │              │ - Redis (活跃Session)     │         │
-│  │                      │              │ - 文件 (历史Session)      │         │
-│  └──────────────────────┘              └──────────────────────────┘         │
-│                                                                             │
-│  用途:                                   用途:                               │
-│  - 用户查看历史对话列表                   - Agent 多轮对话上下文管理           │
-│  - Session 元数据管理                    - 会话恢复与继续                     │
-│  - 权限验证                              - 消息持久化                         │
-│  - 成本统计                                                                   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**关联流程：**
-
-```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant API as API
-    participant DB as MySQL
-    participant SessionMgr as SessionManager
-    participant AgentMgr as AgentManager
-    participant SDK as Claude SDK
-    participant Store as SessionStore
-
-    User->>API: 点击"新建对话"
-    API->>DB: INSERT INTO sessions (user_id, ...)
-    DB-->>API: session_id = "abc-123"
-    
-    Note over API,Store: DB Session 创建完成，返回 session_id
-    
-    User->>API: 发送第一条消息 (session_id="abc-123")
-    API->>SessionMgr: 获取 Session 信息
-    SessionMgr->>DB: SELECT * FROM sessions WHERE id="abc-123"
-    DB-->>SessionMgr: Session 元数据
-    
-    API->>AgentMgr: 创建 Agent (session_id="abc-123")
-    AgentMgr->>Store: SessionStore("abc-123", user_id)
-    
-    Note over Store: 用 DB session_id 作为 Store 的标识
-    
-    AgentMgr->>SDK: ClaudeSDKClient(session_store=Store)
-    
-    SDK->>Store: 加载历史消息 (如果存在)
-    Store-->>SDK: messages=[] (新Session为空)
-    
-    SDK->>SDK: 执行对话
-    SDK->>Store: 保存 messages
-    
-    Note over Store,SDK: 每轮对话后，SDK 自动保存到 Store
-    
-    loop 对话结束
-        AgentMgr->>DB: UPDATE sessions SET tokens=..., cost=...
-    end
-```
-
-**核心代码实现：**
-
-```python
-# services/session_store.py
-from claude_agent_sdk import SessionStore
-import json
-import os
-
-class MySQLSessionStore(SessionStore):
-    """
-    自定义 SessionStore，关联 DB Session
-    
-    关联机制：
-    1. DB Session 的 id 作为 SDK SessionStore 的 session_id
-    2. SessionStore 负责存储 messages (对话内容)
-    3. MySQL 负责存储 metadata (元数据)
-    """
-    
-    def __init__(self, session_id: str, user_id: str):
-        self.session_id = session_id  # 来自 DB Session.id
-        self.user_id = user_id
-        self.redis_key = f"session:{user_id}:{session_id}"
-        self.file_path = f"/data/sessions/{user_id}/{session_id}.json"
-    
-    async def save(self, messages: list, metadata: dict):
-        """
-        保存对话内容
-        
-        存储策略：
-        1. Redis 缓存（活跃 Session，快速访问）
-        2. 文件持久化（历史 Session）
-        """
-        # 保存到 Redis（活跃时使用）
-        await redis_client.set(
-            self.redis_key,
-            json.dumps({"messages": messages, "metadata": metadata}),
-            ex=3600 * 24  # 24小时过期
-        )
-        
-        # 异步写入文件（持久化）
-        await self._save_to_file(messages, metadata)
-        
-        # 更新 DB Session 的统计信息
-        await self._update_db_stats(metadata)
-    
-    async def load(self) -> tuple[list, dict]:
-        """
-        加载对话内容
-        
-        加载策略：
-        1. 先从 Redis 读（最快）
-        2. Redis 没有，从文件读
-        3. 都没有，返回空（新 Session）
-        """
-        # 1. 从 Redis 读
-        data = await redis_client.get(self.redis_key)
-        if data:
-            return json.loads(data)
-        
-        # 2. 从文件读
-        if os.path.exists(self.file_path):
-            with open(self.file_path) as f:
-                return json.load(f)
-        
-        # 3. 新 Session
-        return [], {}
-    
-    async def _save_to_file(self, messages, metadata):
-        """写入文件"""
-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-        with open(self.file_path, 'w') as f:
-            json.dump({
-                "session_id": self.session_id,
-                "messages": messages,
-                "metadata": metadata
-            }, f)
-    
-    async def _update_db_stats(self, metadata):
-        """更新 DB Session 统计"""
-        # 更新 MySQL 中的 token 统计
-        await db.execute("""
-            UPDATE sessions 
-            SET total_input_tokens = total_input_tokens + :input_tokens,
-                total_output_tokens = total_output_tokens + :output_tokens,
-                total_cost = total_cost + :cost,
-                updated_at = NOW()
-            WHERE id = :session_id
-        """, {
-            "session_id": self.session_id,
-            "input_tokens": metadata.get("input_tokens", 0),
-            "output_tokens": metadata.get("output_tokens", 0),
-            "cost": metadata.get("cost", 0)
-        })
-```
-
-**SessionManager 整合：**
-
-```python
-# services/session_manager.py
-
-class SessionManager:
-    """
-    Session 管理器，协调 DB Session 和 SDK SessionStore
-    """
-    
-    async def create_session(self, user_id: str, model: str, agent_type: str) -> str:
-        """
-        创建新 Session
-        
-        流程：
-        1. 在 MySQL 创建 DB Session（获取 session_id）
-        2. session_id 将作为 SDK SessionStore 的标识
-        """
-        # 1. 创建 DB Session
-        result = await db.execute("""
-            INSERT INTO sessions (user_id, model, agent_type, status)
-            VALUES (:user_id, :model, :agent_type, 'active')
-        """, {"user_id": user_id, "model": model, "agent_type": agent_type})
-        
-        session_id = result.lastrowid  # 或用 UUID
-        
-        # 2. 返回 session_id（后续用于创建 SessionStore）
-        return session_id
-    
-    async def get_session(self, session_id: str, user_id: str) -> dict:
-        """
-        获取 Session 信息
-        
-        返回：
-        - DB Session 元数据（来自 MySQL）
-        - messages 内容（来自 SessionStore）
-        """
-        # 1. 从 MySQL 获取元数据
-        db_session = await db.fetch_one("""
-            SELECT * FROM sessions WHERE id = :id AND user_id = :user_id
-        """, {"id": session_id, "user_id": user_id})
-        
-        if not db_session:
-            raise SessionNotFoundError()
-        
-        # 2. 从 SessionStore 获取消息内容
-        store = MySQLSessionStore(session_id, user_id)
-        messages, context = await store.load()
-        
-        # 3. 合并返回
-        return {
-            "session": db_session,
-            "messages": messages,
-            "context": context
-        }
-    
-    async def list_user_sessions(self, user_id: str, status: str = "active") -> list:
-        """
-        获取用户的 Session 列表
-        
-        只查询 MySQL 元数据（不需要加载消息内容）
-        """
-        sessions = await db.fetch_all("""
-            SELECT id, title, model, agent_type, status, 
-                   total_input_tokens, total_output_tokens, total_cost,
-                   created_at, updated_at
-            FROM sessions 
-            WHERE user_id = :user_id AND status = :status
-            ORDER BY updated_at DESC
-            LIMIT 100
-        """, {"user_id": user_id, "status": status})
-        
-        return sessions
-    
-    async def delete_session(self, session_id: str, user_id: str):
-        """
-        删除 Session
-        
-        同时删除：
-        1. MySQL 记录
-        2. Redis 缓存
-        3. 文件存储
-        """
-        # 1. 删除 MySQL
-        await db.execute("""
-            UPDATE sessions SET status = 'deleted', deleted_at = NOW()
-            WHERE id = :id AND user_id = :user_id
-        """, {"id": session_id, "user_id": user_id})
-        
-        # 2. 删除 Redis
-        redis_key = f"session:{user_id}:{session_id}"
-        await redis_client.delete(redis_key)
-        
-        # 3. 删除文件（可选）
-        file_path = f"/data/sessions/{user_id}/{session_id}.json"
-        if os.path.exists(file_path):
-            os.remove(file_path)
-```
-
-**Agent 创建时关联：**
-
-```python
-# services/agent_manager.py
-
-async def create_agent_for_session(session_id: str, user: User):
-    """
-    为指定 Session 创建 Agent
-    
-    关联流程：
-    1. 用 session_id 创建 SessionStore
-    2. SessionStore 会自动加载历史消息（如果有）
-    3. Agent 使用 SessionStore 管理对话上下文
-    """
-    # 1. 获取 DB Session 配置
-    db_session = await session_manager.get_session_meta(session_id)
-    
-    # 2. 获取 Agent 配置
-    agent_config = await get_agent_config(db_session.agent_type)
-    
-    # 3. 创建 SessionStore（关联 DB session_id）
-    session_store = MySQLSessionStore(session_id, user.id)
-    
-    # 4. 构建 Agent Options
-    options = ClaudeAgentOptions(
-        system_prompt=agent_config.system_prompt,
-        allowed_tools=await get_allowed_tools(user, db_session.agent_type),
-        model=db_session.model or user.settings.default_model,
-        permission_mode=user.settings.permission_mode,
-        session_store=session_store,  # 关联 SessionStore
-    )
-    
-    # 5. 创建 Agent
-    return ClaudeSDKClient(options=options)
-```
-
----
-
-### 12.2 MySQL 数据表设计
+### 12.1 数据表设计
 
 **用户表 (users)：**
 
 ```sql
 CREATE TABLE users (
-    id VARCHAR(36) PRIMARY KEY,  -- UUID
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username VARCHAR(50) UNIQUE NOT NULL,
     email VARCHAR(100) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     role VARCHAR(20) DEFAULT 'user',  -- user, admin, super_admin
-    settings JSON DEFAULT NULL,        -- 用户个人设置 {"default_model": "...", "permission_mode": "..."}
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP NULL,
-    
-    INDEX idx_users_email (email),
-    INDEX idx_users_username (username)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    settings JSONB DEFAULT '{}',       -- 用户个人设置
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    deleted_at TIMESTAMP NULL
+);
 ```
 
-**Session 表 (sessions) - 业务 Session 元数据：**
+**Session 表 (sessions)：**
 
 ```sql
 CREATE TABLE sessions (
-    id VARCHAR(36) PRIMARY KEY,  -- UUID，作为 SDK SessionStore 的标识
-    user_id VARCHAR(36) NOT NULL,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id),
     title VARCHAR(200) DEFAULT '新对话',
     model VARCHAR(50) DEFAULT 'claude-sonnet-4-5',
     agent_type VARCHAR(50) DEFAULT 'assistant',
     status VARCHAR(20) DEFAULT 'active',  -- active, archived, deleted
-    
-    -- Token 统计（用于成本追踪）
-    total_input_tokens INT DEFAULT 0,
-    total_output_tokens INT DEFAULT 0,
-    total_cost DECIMAL(10, 4) DEFAULT 0.0,
-    
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP NULL,
-    
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    INDEX idx_sessions_user_id (user_id),
-    INDEX idx_sessions_status (status),
-    INDEX idx_sessions_updated_at (updated_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    total_input_tokens INTEGER DEFAULT 0,
+    total_output_tokens INTEGER DEFAULT 0,
+    total_cost DECIMAL(10, 4) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    deleted_at TIMESTAMP NULL
+);
+
+CREATE INDEX idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX idx_sessions_status ON sessions(status);
 ```
 
 **Agent 类型表 (agent_types)：**
 
 ```sql
 CREATE TABLE agent_types (
-    id VARCHAR(36) PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL,        -- researcher, coder, assistant...
-    display_name VARCHAR(100) NOT NULL,      -- 研究员, 编码助手...
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(50) UNIQUE NOT NULL,
+    display_name VARCHAR(100) NOT NULL,
     description TEXT,
     system_prompt TEXT NOT NULL,
-    allowed_tools JSON DEFAULT NULL,         -- ["WebSearch", "WebFetch"]
-    disallowed_tools JSON DEFAULT NULL,      -- ["Bash"]
+    allowed_tools JSONB DEFAULT '[]',
+    disallowed_tools JSONB DEFAULT '[]',
     default_model VARCHAR(50) DEFAULT 'claude-sonnet-4-5',
-    allowed_roles JSON DEFAULT NULL,         -- ["user", "admin"]
-    is_enabled BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    INDEX idx_agent_types_name (name),
-    INDEX idx_agent_types_enabled (is_enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    allowed_roles JSONB DEFAULT '["user", "admin"]',
+    is_enabled BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 ```
 
 **模型配置表 (model_configs)：**
 
 ```sql
 CREATE TABLE model_configs (
-    id VARCHAR(36) PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL,        -- claude-opus-4-6
-    display_name VARCHAR(100) NOT NULL,      -- Claude Opus 4
-    is_enabled BOOLEAN DEFAULT TRUE,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(50) UNIQUE NOT NULL,      -- claude-opus-4-6
+    display_name VARCHAR(100) NOT NULL,    -- Claude Opus 4
+    is_enabled BOOLEAN DEFAULT true,
     default_temperature DECIMAL(3, 2) DEFAULT 0.7,
-    max_output_tokens INT DEFAULT 4096,
-    input_cost_per_1k DECIMAL(10, 4),        -- 输入 token 成本
-    output_cost_per_1k DECIMAL(10, 4),       -- 输出 token 成本
-    allowed_roles JSON DEFAULT NULL,         -- ["user", "admin", "super_admin"]
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    INDEX idx_model_configs_name (name),
-    INDEX idx_model_configs_enabled (is_enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    max_output_tokens INTEGER DEFAULT 4096,
+    input_cost_per_1k DECIMAL(10, 4),
+    output_cost_per_1k DECIMAL(10, 4),
+    allowed_roles JSONB DEFAULT '["user", "admin"]',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 ```
 
 **工具配置表 (tool_configs)：**
 
 ```sql
 CREATE TABLE tool_configs (
-    id VARCHAR(36) PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(50) UNIQUE NOT NULL,
     description TEXT,
-    is_builtin BOOLEAN DEFAULT FALSE,        -- 内置工具 vs 自定义工具
-    is_enabled BOOLEAN DEFAULT TRUE,
-    allowed_roles JSON DEFAULT NULL,         -- ["user"]
-    requires_confirmation BOOLEAN DEFAULT FALSE,
-    mcp_server VARCHAR(50) NULL,             -- 来源 MCP Server
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    INDEX idx_tool_configs_name (name),
-    INDEX idx_tool_configs_enabled (is_enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    is_builtin BOOLEAN DEFAULT false,
+    is_enabled BOOLEAN DEFAULT true,
+    allowed_roles JSONB DEFAULT '["user"]',
+    requires_confirmation BOOLEAN DEFAULT false,
+    mcp_server VARCHAR(50) NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 ```
 
 **MCP Server 配置表 (mcp_servers)：**
 
 ```sql
 CREATE TABLE mcp_servers (
-    id VARCHAR(36) PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(50) UNIQUE NOT NULL,
-    command TEXT NOT NULL,                   -- 启动命令
-    args JSON DEFAULT NULL,                  -- ["--port", "8080"]
-    env JSON DEFAULT NULL,                   -- {"API_KEY": "..."}
-    is_enabled BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    INDEX idx_mcp_servers_name (name),
-    INDEX idx_mcp_servers_enabled (is_enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    command TEXT NOT NULL,
+    args JSONB DEFAULT '[]',
+    env JSONB DEFAULT '{}',
+    is_enabled BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 ```
 
 **系统配置表 (system_config)：**
 
 ```sql
 CREATE TABLE system_config (
-    config_key VARCHAR(50) PRIMARY KEY,
-    config_value JSON NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    key VARCHAR(50) PRIMARY KEY,
+    value JSONB NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 
 -- 默认配置
-INSERT INTO system_config (config_key, config_value) VALUES
+INSERT INTO system_config (key, value) VALUES
 ('default_model', '"claude-sonnet-4-5"'),
 ('fallback_model', '"claude-haiku-4-5"'),
-('max_tokens_limit', '100000'),
-('api_keys', '{"anthropic": "..."}');
+('max_tokens_limit', '100000');
 ```
 
-**Session 消息索引表 (可选) - 用于搜索：**
-
-```sql
-CREATE TABLE session_messages (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    session_id VARCHAR(36) NOT NULL,
-    message_id VARCHAR(36) NOT NULL,
-    role VARCHAR(20) NOT NULL,               -- user, assistant, tool
-    content_type VARCHAR(20),                 -- text, tool_use, tool_result
-    content_preview VARCHAR(500),             -- 内容摘要（用于搜索）
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (session_id) REFERENCES sessions(id),
-    INDEX idx_messages_session (session_id),
-    INDEX idx_messages_created (created_at),
-    FULLTEXT INDEX ft_messages_content (content_preview)  -- 全文搜索
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-
----
-
-### 12.3 Session 存储架构总结
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Session 存储架构                                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  数据类型              存储位置            用途                              │
-│  ─────────────────────────────────────────────────────────────────────────  │
-│                                                                             │
-│  Session 元数据         MySQL              用户查看历史列表                   │
-│  - id, title           sessions表         权限验证                          │
-│  - model, agent_type                      成本统计                          │
-│  - token 统计                                                               │
-│                                                                             │
-│  Session 消息内容       Redis + 文件       Agent 对话上下文                  │
-│  - messages            (SessionStore)      会话恢复                          │
-│  - context                                消息持久化                        │
-│                                                                             │
-│  关联方式:                                                                   │
-│  MySQL sessions.id = SessionStore.session_id                                │
-│                                                                             │
-│  查询历史列表:                                                               │
-│  SELECT * FROM sessions WHERE user_id = ? AND status = 'active'             │
-│  （只查 MySQL，不加载消息内容，快速）                                         │
-│                                                                             │
-│  查看具体对话:                                                               │
-│  1. SELECT * FROM sessions WHERE id = ?  （获取元数据）                      │
-│  2. SessionStore.load()                     （获取消息内容）                  │
-│                                                                             │
-│  启动 Agent:                                                                 │
-│  SessionStore = MySQLSessionStore(session_id=mysql_session.id)              │
-│  ClaudeSDKClient(session_store=SessionStore)                                │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-### 12.4 MySQL 连接配置
+### 12.2 数据库连接
 
 ```python
 # core/database.py
@@ -1817,29 +1429,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
-# MySQL 连接配置（使用 aiomysql 支持异步）
-DATABASE_URL = "mysql+aiomysql://user:password@localhost:3306/agent_platform?charset=utf8mb4"
+DATABASE_URL = "postgresql+asyncpg://user:pass@localhost/agent_platform"
 
-engine = create_async_engine(
-    DATABASE_URL, 
-    echo=True,
-    pool_size=10,
-    max_overflow=20,
-    pool_recycle=3600
-)
-
+engine = create_async_engine(DATABASE_URL, echo=True)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def get_db():
     async with async_session() as session:
         yield session
-
-# Redis 连接
-import aioredis
-
-REDIS_URL = "redis://localhost:6379/0"
-
-redis_client = aioredis.from_url(REDIS_URL)
 ```
 
 ---
@@ -1864,7 +1461,7 @@ redis_client = aioredis.from_url(REDIS_URL)
 ```
 Day 1-2: 项目初始化
 ├── 创建项目目录结构
-├── 初始化数据库（MySQL）
+├── 初始化数据库（PostgreSQL）
 ├── 配置 Redis
 ├── 初始化 FastAPI 项目
 └── 编写数据库表定义
