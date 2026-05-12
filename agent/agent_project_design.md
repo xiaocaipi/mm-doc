@@ -2,7 +2,7 @@
 
 > 基于 Claude Agent SDK Python 构建多用户 Agent 应用平台
 >
-> 文档版本：v2.0
+> 文档版本：v2.1
 > 日期：2026-05-12
 
 ---
@@ -15,7 +15,7 @@
 4. [用户系统设计](#4-用户系统设计)
 5. [Session 管理设计](#5-session-管理设计)
 6. [前端页面设计](#6-前端页面设计)
-7. [后端 API 设计](#7-后端-api-设计)
+7. [后端 API 设计](#7-后端-api设计)
 8. [模型配置设计](#8-模型配置设计)
 9. [Agent 模块设计](#9-agent-模块设计)
 10. [工具系统设计](#10-工具系统设计)
@@ -54,7 +54,7 @@ graph TB
     end
 
     subgraph DATABASE["数据层"]
-        DB["数据库<br/>用户 / Session / 配置"]
+        DB["MySQL<br/>用户 / Session / 配置"]
         STORE["Session Store<br/>对话内容"]
     end
 
@@ -114,21 +114,21 @@ graph TB
 | MySQL | 关系型数据、用户/配置存储 |
 | Redis | Session 缓存、实时状态 |
 
-### 2.3 Claude Agent SDK 优势
+### 2.3 Claude Agent SDK 内置能力
 
-**SDK 内置能力（无需开发）：**
+**使用 SDK 后无需开发的能力：**
 
-```
-SDK 内置：
-├── 查询引擎 (query() + ClaudeSDKClient)
-├── 30+ 内置工具 (Bash, Read, Write, Edit, WebSearch...)
-├── MCP 协议集成
-├── Hooks 系统
-├── 权限模式 (default/acceptEdits/plan/bypassPermissions)
-├── 上下文压缩 (Auto Compact)
-├── Prompt Cache
-└── 多模型支持
-```
+| 能力 | 说明 |
+|------|------|
+| 查询引擎 | `query()` 单次查询 + `ClaudeSDKClient` 多轮对话 |
+| 内置工具 | 30+ 工具（Bash, Read, Write, Edit, WebSearch, WebFetch...） |
+| MCP 协议 | 外部 MCP Server 接入 + SDK MCP Server（in-process） |
+| Hooks 系统 | PreToolUse, PostToolUse, Stop, Notification 等 |
+| 权限模式 | default, acceptEdits, plan, bypassPermissions, auto |
+| 会话管理 | SessionStore API、会话恢复 |
+| 上下文压缩 | Auto Compact 自动压缩 |
+| Prompt Cache | 自动缓存优化 |
+| 多模型支持 | 动态切换模型 |
 
 ---
 
@@ -176,7 +176,7 @@ flowchart TB
     end
 
     subgraph DATA["数据层"]
-        PG["MySQL<br/>用户/配置"]
+        MYSQL["MySQL<br/>用户/配置"]
         REDIS["Redis<br/>Session 缓存"]
         FILE["文件存储<br/>Session 内容"]
     end
@@ -238,40 +238,45 @@ sequenceDiagram
     SessionMgr->>DB: 持久化
 ```
 
+### 3.3 核心组件职责
+
+| 组件 | 职责 | 开发方 |
+|------|------|--------|
+| 前端应用 | 用户界面、WebSocket 通信 | 自研 |
+| API 服务 | RESTful API、WebSocket 服务 | 自研 |
+| 用户管理 | 用户 CRUD、认证、权限 | 自研 |
+| Session 管理 | Session 元数据、内容存储 | 自研 |
+| Agent 管理 | Agent 创建、配置、生命周期 | 自研 |
+| 配置管理 | 模型、Agent、工具配置 | 自研 |
+| Claude Agent SDK | Agent 核心、工具执行 | Anthropic |
+| Claude Code CLI | QueryEngine、压缩、缓存 | Anthropic |
+
 ---
 
 ## 4. 用户系统设计
 
 ### 4.1 用户数据模型
 
-```python
-# models/user.py
-from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional
-import uuid
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | 用户唯一标识 |
+| username | VARCHAR(50) | 用户名 |
+| email | VARCHAR(100) | 邮箱 |
+| password_hash | VARCHAR(255) | 密码（bcrypt加密） |
+| role | VARCHAR(20) | 角色：user, admin, super_admin |
+| settings | JSON | 用户个人设置 |
+| created_at | TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | 更新时间 |
 
-class User(BaseModel):
-    """用户模型"""
-    id: str = str(uuid.uuid4())
-    username: str
-    email: str
-    password_hash: str  # bcrypt 加密
-    role: str = "user"  # user, admin, super_admin
-    created_at: datetime = datetime.utcnow()
-    updated_at: datetime = datetime.utcnow()
-    
-    # 用户配置（可覆盖系统默认）
-    settings: UserSettings = UserSettings()
+**用户个人设置（settings 字段）：**
 
-class UserSettings(BaseModel):
-    """用户个人设置"""
-    default_model: str = "claude-sonnet-4-5"
-    permission_mode: str = "default"
-    allowed_tools: list[str] = []  # 用户可用的工具
-    max_sessions: int = 100  # 最大 Session 数量
-    max_tokens_per_session: int = 100000
-```
+| 设置项 | 说明 |
+|------|------|
+| default_model | 用户默认模型 |
+| permission_mode | 权限模式 |
+| allowed_tools | 用户可用工具列表 |
+| max_sessions | 最大 Session 数量 |
+| max_tokens_per_session | 单 Session 最大 tokens |
 
 ### 4.2 认证流程
 
@@ -302,220 +307,125 @@ sequenceDiagram
     end
 ```
 
-### 4.3 认证 API
+### 4.3 认证 API 设计
 
-```python
-# api/auth.py
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import HTTPBearer
-from pydantic import BaseModel
-
-router = APIRouter(prefix="/api/auth", tags=["认证"])
-security = HTTPBearer()
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-class LoginResponse(BaseModel):
-    token: str
-    user: User
-    expires_at: str
-
-@router.post("/login", response_model=LoginResponse)
-async def login(req: LoginRequest):
-    """用户登录"""
-    user = await get_user_by_username(req.username)
-    if not user or not verify_password(req.password, user.password_hash):
-        raise HTTPException(401, "用户名或密码错误")
-    
-    token = create_jwt_token(user.id)
-    return LoginResponse(token=token, user=user, expires_at=get_expire_time())
-
-@router.post("/register")
-async def register(req: RegisterRequest):
-    """用户注册"""
-    # 检查用户名是否存在
-    # 创建用户
-    # 返回 token
-
-@router.get("/me", response_model=User)
-async def get_current_user(token: str = Depends(security)):
-    """获取当前用户信息"""
-    user_id = verify_jwt_token(token)
-    user = await get_user_by_id(user_id)
-    return user
-```
+| API | 方法 | 说明 |
+|------|------|------|
+| `/api/auth/login` | POST | 用户登录，返回 JWT Token |
+| `/api/auth/register` | POST | 用户注册 |
+| `/api/auth/logout` | POST | 用户登出 |
+| `/api/auth/me` | GET | 获取当前用户信息 |
+| `/api/auth/refresh` | POST | 刷新 Token |
 
 ---
 
 ## 5. Session 管理设计
 
-### 5.1 Session 数据模型
+### 5.1 DB Session 与 SDK Session 关联机制
 
-```python
-# models/session.py
-from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional
-import uuid
+**两种 Session 的区别与关联：**
 
-class Session(BaseModel):
-    """Session 元数据"""
-    id: str = str(uuid.uuid4())
-    user_id: str
-    title: str = "新对话"  # 自动生成或用户命名
-    model: str = "claude-sonnet-4-5"
-    agent_type: str = "assistant"  # assistant, researcher, coder...
-    status: str = "active"  # active, archived, deleted
-    created_at: datetime = datetime.utcnow()
-    updated_at: datetime = datetime.utcnow()
-    
-    # Token 统计
-    total_input_tokens: int = 0
-    total_output_tokens: int = 0
-    total_cost: float = 0.0
+```mermaid
+flowchart LR
+    subgraph DB_SESSION["DB Session (MySQL)"]
+        direction TB
+        DB_ID["session_id (UUID)"]
+        DB_META["元数据<br/>- user_id<br/>- title<br/>- model<br/>- agent_type<br/>- token统计"]
+        DB_PURPOSE["用途：<br/>- 用户查看历史列表<br/>- 权限验证<br/>- 成本统计"]
+    end
 
-class SessionContent(BaseModel):
-    """Session 内容（存储在文件或 Redis）"""
-    session_id: str
-    messages: list[dict]  # Message 列表
-    context: dict  # 上下文信息
+    subgraph SDK_SESSION["SDK Session (SessionStore)"]
+        direction TB
+        SDK_ID["session_id (同一个UUID)"]
+        SDK_CONTENT["内容<br/>- messages<br/>- context<br/>- metadata"]
+        SDK_PURPOSE["用途：<br/>- Agent 对话上下文<br/>- 会话恢复<br/>- 消息持久化"]
+        SDK_STORE["存储：<br/>- Redis (活跃)<br/>- 文件 (历史)"]
+    end
+
+    DB_ID -.->|"关联标识"| SDK_ID
 ```
 
-### 5.2 Session 存储策略
+**关联流程：**
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant API as API
+    participant DB as MySQL
+    participant Store as SessionStore
+    participant SDK as Claude SDK
+
+    User->>API: 点击"新建对话"
+    API->>DB: INSERT sessions (user_id...)
+    DB-->>API: session_id = "abc-123"
+    
+    Note over API,Store: DB Session 创建完成
+
+    User->>API: 发送消息 (session_id="abc-123")
+    API->>DB: SELECT sessions WHERE id="abc-123"
+    DB-->>API: Session 元数据
+    
+    API->>Store: SessionStore("abc-123", user_id)
+    Note over Store: 用 DB session_id 作为标识
+    
+    API->>SDK: ClaudeSDKClient(session_store=Store)
+    SDK->>Store: load() 加载历史消息
+    Store-->>SDK: messages=[] (新Session)
+    
+    SDK->>SDK: 执行对话
+    SDK->>Store: save(messages) 保存
+    
+    Note over Store,SDK: 每轮对话后自动保存
+    
+    API->>DB: UPDATE sessions (tokens, cost)
+```
+
+### 5.2 Session 数据模型
+
+**MySQL Session 表（元数据）：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | Session ID，关联 SDK SessionStore |
+| user_id | UUID | 所属用户 |
+| title | VARCHAR(200) | Session 标题 |
+| model | VARCHAR(50) | 使用的模型 |
+| agent_type | VARCHAR(50) | Agent 类型 |
+| status | VARCHAR(20) | 状态：active, archived, deleted |
+| total_input_tokens | INT | 输入 token 统计 |
+| total_output_tokens | INT | 输出 token 统计 |
+| total_cost | DECIMAL | 成本统计 |
+| created_at | TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | 更新时间 |
+
+**SessionStore 存储内容：**
+
+| 内容 | 说明 |
+|------|------|
+| session_id | 与 MySQL sessions.id 相同 |
+| messages | 对话消息列表 |
+| context | 对话上下文信息 |
+| metadata | token 统计、成本等 |
+
+### 5.3 Session 存储策略
 
 | 数据类型 | 存储位置 | 原因 |
 |----------|----------|------|
-| Session 元数据 | MySQL | 查询、过滤、统计 |
+| Session 元数据 | MySQL | 查询、过滤、统计、用户列表展示 |
 | Session 内容（活跃） | Redis | 快速访问、流式写入 |
-| Session 内容（历史） | 文件系统/对象存储 | 大数据、持久化 |
-| Session 累计统计 | MySQL | 成本追踪、分析 |
+| Session 内容（历史） | 文件系统 | 大数据、持久化、低成本 |
+| Session 统计 | MySQL | 成本追踪、分析 |
 
-### 5.3 Session API
+### 5.4 Session API 设计
 
-```python
-# api/session.py
-from fastapi import APIRouter, Depends, Query
-from typing import List
-
-router = APIRouter(prefix="/api/sessions", tags=["Session"])
-
-@router.get("/", response_model=List[Session])
-async def list_sessions(
-    user: User = Depends(get_current_user),
-    status: str = Query(default="active"),
-    page: int = Query(default=1),
-    page_size: int = Query(default=20)
-):
-    """获取用户的 Session 列表"""
-    sessions = await get_user_sessions(
-        user_id=user.id,
-        status=status,
-        offset=(page - 1) * page_size,
-        limit=page_size
-    )
-    return sessions
-
-@router.get("/{session_id}", response_model=SessionDetail)
-async def get_session_detail(
-    session_id: str,
-    user: User = Depends(get_current_user)
-):
-    """获取 Session 详情（包含消息内容）"""
-    # 验证 Session 属于该用户
-    session = await get_session(session_id)
-    if session.user_id != user.id:
-        raise HTTPException(403, "无权访问此 Session")
-    
-    # 获取消息内容
-    content = await get_session_content(session_id)
-    return SessionDetail(session=session, messages=content.messages)
-
-@router.post("/", response_model=Session)
-async def create_session(
-    req: CreateSessionRequest,
-    user: User = Depends(get_current_user)
-):
-    """创建新 Session"""
-    session = await create_new_session(
-        user_id=user.id,
-        model=req.model or user.settings.default_model,
-        agent_type=req.agent_type
-    )
-    return session
-
-@router.delete("/{session_id}")
-async def delete_session(
-    session_id: str,
-    user: User = Depends(get_current_user)
-):
-    """删除 Session"""
-    # 验证权限
-    # 标记为 deleted 或彻底删除
-
-@router.patch("/{session_id}/title")
-async def update_session_title(
-    session_id: str,
-    req: UpdateTitleRequest,
-    user: User = Depends(get_current_user)
-):
-    """更新 Session 标题"""
-```
-
-### 5.4 Session Store 实现
-
-```python
-# services/session_store.py
-from claude_agent_sdk import SessionStore
-import json
-import os
-
-class DatabaseSessionStore(SessionStore):
-    """自定义 Session 存储，对接数据库"""
-    
-    def __init__(self, session_id: str, user_id: str):
-        self.session_id = session_id
-        self.user_id = user_id
-        self.redis_key = f"session:{user_id}:{session_id}"
-    
-    async def save(self, messages: list, metadata: dict):
-        """保存 Session 到 Redis（活跃）和文件（备份）"""
-        # Redis 快速存储
-        await redis.set(
-            self.redis_key,
-            json.dumps({"messages": messages, "metadata": metadata}),
-            ex=3600 * 24  # 24 小时过期
-        )
-        
-        # 异步写入文件（持久化）
-        await self._write_to_file(messages, metadata)
-    
-    async def load(self) -> tuple[list, dict]:
-        """加载 Session"""
-        # 先从 Redis 读
-        data = await redis.get(self.redis_key)
-        if data:
-            return json.loads(data)
-        
-        # Redis 没有，从文件读
-        return await self._read_from_file()
-    
-    async def _write_to_file(self, messages, metadata):
-        """写入文件"""
-        path = f"/data/sessions/{self.user_id}/{self.session_id}.json"
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump({"messages": messages, "metadata": metadata}, f)
-    
-    async def _read_from_file(self):
-        """从文件读取"""
-        path = f"/data/sessions/{self.user_id}/{self.session_id}.json"
-        if os.path.exists(path):
-            with open(path) as f:
-                return json.load(f)
-        return [], {}
-```
+| API | 方法 | 说明 |
+|------|------|------|
+| `/api/sessions` | GET | 获取用户 Session 列表 |
+| `/api/sessions` | POST | 创建新 Session |
+| `/api/sessions/{id}` | GET | 获取 Session 详情（含消息） |
+| `/api/sessions/{id}` | DELETE | 删除 Session |
+| `/api/sessions/{id}/title` | PATCH | 更新标题 |
+| `/api/sessions/{id}/archive` | PATCH | 归档 Session |
 
 ---
 
@@ -538,30 +448,13 @@ class DatabaseSessionStore(SessionStore):
 │
 └── 后台设置页面（管理员）
     ├── 用户管理
-    │   ├── 用户列表
-    │   ├── 添加/编辑用户
-    │   └── 权限分配
     ├── 模型配置
-    │   ├── 可用模型列表
-    │   ├── 默认模型设置
-    │   ├── 模型参数（temperature 等）
     ├── Agent 配置
-    │   ├── Agent 类型管理
-    │   ├── 工具绑定
-    │   ├── System Prompt 编辑
     ├── 工具配置
-    │   ├── 工具列表
-    │   ├── MCP Server 配置
-    │   ├── 权限规则
     └── 系统设置
-        ├── API Key 管理
-        ├── 成本监控
-        ├── 日志查看
 ```
 
-### 6.2 聊天页面设计
-
-**页面布局：**
+### 6.2 聊天页面布局
 
 ```
 +--------------------------------------------------+
@@ -586,7 +479,7 @@ class DatabaseSessionStore(SessionStore):
 +--------------------------------------------------+
 ```
 
-**消息类型渲染：**
+### 6.3 消息类型渲染
 
 | 消息类型 | 渲染方式 |
 |----------|----------|
@@ -597,184 +490,17 @@ class DatabaseSessionStore(SessionStore):
 | Thinking | 隐藏或可展开的思考过程 |
 | Error | 红色高亮错误信息 |
 
-### 6.3 后台设置页面设计
+### 6.4 后台设置页面
 
-**模型配置页面：**
+**页面结构：**
 
-```
-+--------------------------------------------------+
-|  模型配置                                         |
-+--------------------------------------------------+
-|                                                  |
-|  可用模型列表：                                   |
-|  +--------------------------------------------+  |
-|  | [x] claude-opus-4-6   | 默认: [] | 参数   |  |
-|  | [x] claude-sonnet-4-5 | 默认: [*] | 参数   |  |
-|  | [x] claude-haiku-4-5  | 省: [] | 参数   |  |
-|  +--------------------------------------------+  |
-|                                                  |
-|  全局默认模型：claude-sonnet-4-5                  |
-|                                                  |
-|  模型参数：                                       |
-|  - Temperature: [0.7] 滑动条                     |
-|  - Max Tokens: [4096]                            |
-|                                                  |
-|  [保存配置]                                       |
-+--------------------------------------------------+
-```
-
-**Agent 配置页面：**
-
-```
-+--------------------------------------------------+
-|  Agent 类型管理                                   |
-+--------------------------------------------------+
-|                                                  |
-|  +--------------------------------------------+  |
-|  | Agent 名称 | System Prompt | 工具 | 操作 |  |
-|  +--------------------------------------------+  |
-|  | Researcher | [编辑]        | [配置] | [删除]|  |
-|  | Coder      | [编辑]        | [配置] | [删除]|  |
-|  | Assistant  | [编辑]        | [配置] | [删除]|  |
-|  +--------------------------------------------+  |
-|                                                  |
-|  [+ 新建 Agent 类型]                              |
-|                                                  |
-+--------------------------------------------------+
-```
-
-### 6.4 前端技术实现
-
-**目录结构：**
-
-```
-frontend/
-├── src/
-│   ├── pages/
-│   │   ├── Login.tsx           # 登录页
-│   │   ├── Chat.tsx            # 聊天页
-│   │   ├── Settings/           # 后台设置
-│   │   │   ├── index.tsx       # 设置主页
-│   │   │   ├── Models.tsx      # 模型配置
-│   │   │   ├── Agents.tsx      # Agent 配置
-│   │   │   ├── Tools.tsx       # 工具配置
-│   │   │   ├── Users.tsx       # 用户管理
-│   │   │   └── System.tsx      # 系统设置
-│   │
-│   ├── components/
-│   │   ├── Chat/
-│   │   │   ├── MessageList.tsx
-│   │   │   ├── MessageItem.tsx
-│   │   │   ├── ToolCallView.tsx
-│   │   │   ├── InputArea.tsx
-│   │   │   └── SessionSidebar.tsx
-│   │   ├── Settings/
-│   │   │   ├── ModelConfigForm.tsx
-│   │   │   ├── AgentConfigForm.tsx
-│   │   │   └── UserTable.tsx
-│   │   └── common/
-│   │       ├── Header.tsx
-│   │       ├── Sidebar.tsx
-│   │       └── Loading.tsx
-│   │
-│   ├── hooks/
-│   │   ├── useWebSocket.ts     # WebSocket 连接
-│   │   ├── useSession.ts       # Session 管理
-│   │   └── useAuth.ts          # 认证
-│   │
-│   ├── stores/
-│   │   ├── userStore.ts        # 用户状态
-│   │   ├── chatStore.ts        # 聊天状态
-│   │   └── settingsStore.ts    # 设置状态
-│   │
-│   ├── services/
-│   │   ├── api.ts              # API 调用
-│   │   ├── websocket.ts        # WebSocket
-│   │   └── auth.ts             # 认证服务
-│   │
-│   └── types/
-│   │   ├── user.ts
-│   │   ├── session.ts
-│   │   ├── message.ts
-│   │   └── config.ts
-│   │
-│   ├── App.tsx
-│   ├── router.tsx
-│   └── main.tsx
-│
-├── package.json
-├── tsconfig.json
-└── vite.config.ts
-```
-
-**WebSocket 消息处理：**
-
-```typescript
-// hooks/useWebSocket.ts
-import { useEffect, useRef } from 'react'
-import { useChatStore } from '../stores/chatStore'
-
-export function useWebSocket(sessionId: string) {
-  const wsRef = useRef<WebSocket | null>(null)
-  const { addMessage, updateStreamingMessage } = useChatStore()
-
-  useEffect(() => {
-    const ws = new WebSocket(`ws://api.example.com/ws/${sessionId}`)
-    
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      
-      switch (data.type) {
-        case 'message_start':
-          addMessage({
-            id: data.message_id,
-            role: 'assistant',
-            content: '',
-            status: 'streaming'
-          })
-          break
-          
-        case 'content_block_delta':
-          updateStreamingMessage(data.message_id, data.delta)
-          break
-          
-        case 'message_stop':
-          updateStreamingMessage(data.message_id, { status: 'complete' })
-          break
-          
-        case 'tool_use':
-          addMessage({
-            id: data.tool_id,
-            role: 'tool',
-            name: data.tool_name,
-            input: data.tool_input,
-            status: 'running'
-          })
-          break
-          
-        case 'tool_result':
-          updateStreamingMessage(data.tool_id, {
-            status: 'complete',
-            output: data.result
-          })
-          break
-      }
-    }
-    
-    wsRef.current = ws
-    return () => ws.close()
-  }, [sessionId])
-
-  const sendMessage = (content: string) => {
-    wsRef.current?.send(JSON.stringify({
-      type: 'user_message',
-      content
-    }))
-  }
-
-  return { sendMessage }
-}
-```
+| 页面 | 功能 |
+|------|------|
+| 用户管理 | 用户列表、添加/编辑用户、权限分配 |
+| 模型配置 | 可用模型列表、默认模型、模型参数 |
+| Agent 配置 | Agent 类型管理、System Prompt、工具绑定 |
+| 工具配置 | 工具列表、MCP Server、权限规则 |
+| 系统设置 | API Key、成本监控、日志查看 |
 
 ---
 
@@ -789,126 +515,61 @@ export function useWebSocket(sessionId: string) {
 | Session | `/api/sessions` | Session 管理、历史查询 |
 | 聊天 | `/api/chat` | WebSocket、消息发送 |
 | 配置 | `/api/config` | 模型、Agent、工具配置 |
-| Agent | `/api/agents` | Agent 类型管理 |
 
-### 7.2 API 详细设计
+### 7.2 API 详细列表
 
 **认证 API：**
 
-```
-POST   /api/auth/login          # 登录
-POST   /api/auth/register       # 注册
-POST   /api/auth/logout         # 登出
-GET    /api/auth/me             # 获取当前用户
-POST   /api/auth/refresh        # 刷新 Token
-```
+| API | 方法 | 说明 |
+|------|------|------|
+| `/api/auth/login` | POST | 登录 |
+| `/api/auth/register` | POST | 注册 |
+| `/api/auth/logout` | POST | 登出 |
+| `/api/auth/me` | GET | 获取当前用户 |
+| `/api/auth/refresh` | POST | 刷新 Token |
 
 **用户 API（管理员）：**
 
-```
-GET    /api/users               # 用户列表
-POST   /api/users               # 创建用户
-GET    /api/users/{id}          # 用户详情
-PUT    /api/users/{id}          # 更新用户
-DELETE /api/users/{id}          # 删除用户
-PUT    /api/users/{id}/role     # 更改角色
-```
+| API | 方法 | 说明 |
+|------|------|------|
+| `/api/users` | GET | 用户列表 |
+| `/api/users` | POST | 创建用户 |
+| `/api/users/{id}` | GET | 用户详情 |
+| `/api/users/{id}` | PUT | 更新用户 |
+| `/api/users/{id}` | DELETE | 删除用户 |
+| `/api/users/{id}/role` | PUT | 更改角色 |
 
 **Session API：**
 
-```
-GET    /api/sessions            # Session 列表（当前用户）
-POST   /api/sessions            # 创建 Session
-GET    /api/sessions/{id}       # Session 详情（含消息）
-DELETE /api/sessions/{id}       # 删除 Session
-PATCH  /api/sessions/{id}/title # 更新标题
-PATCH  /api/sessions/{id}/archive # 归档
-```
+| API | 方法 | 说明 |
+|------|------|------|
+| `/api/sessions` | GET | Session 列表（当前用户） |
+| `/api/sessions` | POST | 创建 Session |
+| `/api/sessions/{id}` | GET | Session 详情（含消息） |
+| `/api/sessions/{id}` | DELETE | 删除 Session |
+| `/api/sessions/{id}/title` | PATCH | 更新标题 |
+| `/api/sessions/{id}/archive` | PATCH | 归档 |
 
-**聊天 API（WebSocket）：**
+**聊天 API：**
 
-```
-WS     /api/ws/{session_id}     # WebSocket 连接
-POST   /api/chat/{session_id}/message  # 发送消息（备用 HTTP）
-GET    /api/chat/{session_id}/stream   # SSE 流（备用）
-```
+| API | 方法 | 说明 |
+|------|------|------|
+| `/api/ws/{session_id}` | WebSocket | WebSocket 连接 |
+| `/api/chat/{session_id}/message` | POST | 发送消息（HTTP 备用） |
+| `/api/chat/{session_id}/stream` | GET | SSE 流（备用） |
 
 **配置 API：**
 
-```
-GET    /api/config/models       # 获取可用模型列表
-PUT    /api/config/models       # 更新模型配置
-GET    /api/config/default-model # 获取默认模型
-PUT    /api/config/default-model # 设置默认模型
-
-GET    /api/config/agents       # 获取 Agent 类型列表
-POST   /api/config/agents       # 创建 Agent 类型
-PUT    /api/config/agents/{id}  # 更新 Agent 类型
-DELETE /api/config/agents/{id}  # 删除 Agent 类型
-
-GET    /api/config/tools        # 获取工具列表
-PUT    /api/config/tools/permissions # 更新工具权限
-
-GET    /api/config/mcp-servers  # MCP Server 配置
-POST   /api/config/mcp-servers  # 添加 MCP Server
-DELETE /api/config/mcp-servers/{id} # 删除 MCP Server
-```
-
-### 7.3 API 实现示例
-
-```python
-# main.py
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-from api import auth, users, sessions, chat, config
-
-app = FastAPI(
-    title="Agent Platform API",
-    version="1.0.0"
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(auth.router)
-app.include_router(users.router)
-app.include_router(sessions.router)
-app.include_router(chat.router)
-app.include_router(config.router)
-
-# WebSocket 路由
-@app.websocket("/api/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    await websocket.accept()
-    
-    # 验证用户
-    user = await verify_websocket_user(websocket)
-    
-    # 创建 Agent 实例
-    agent = await create_agent_for_session(session_id, user)
-    
-    try:
-        while True:
-            # 接收用户消息
-            data = await websocket.receive_json()
-            
-            if data["type"] == "user_message":
-                # 发送给 Agent
-                await agent.query(data["content"])
-                
-                # 流式返回
-                async for msg in agent.receive_response():
-                    await websocket.send_json(msg.to_dict())
-                    
-    except WebSocketDisconnect:
-        await agent.close()
-```
+| API | 方法 | 说明 |
+|------|------|------|
+| `/api/config/models` | GET | 获取可用模型列表 |
+| `/api/config/models` | PUT | 更新模型配置 |
+| `/api/config/default-model` | GET/PUT | 默认模型 |
+| `/api/config/agents` | GET/POST | Agent 类型管理 |
+| `/api/config/agents/{id}` | PUT/DELETE | 更新/删除 Agent |
+| `/api/config/tools` | GET | 工具列表 |
+| `/api/config/tools/permissions` | PUT | 工具权限 |
+| `/api/config/mcp-servers` | GET/POST | MCP Server 配置 |
 
 ---
 
@@ -916,378 +577,185 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
 ### 8.1 模型配置数据模型
 
-```python
-# models/config.py
-from pydantic import BaseModel
-from typing import Literal
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | 配置 ID |
+| name | VARCHAR(50) | 模型名称（claude-opus-4-6） |
+| display_name | VARCHAR(100) | 显示名称（Claude Opus 4） |
+| is_enabled | BOOLEAN | 是否启用 |
+| default_temperature | DECIMAL | 默认温度 |
+| max_output_tokens | INT | 最大输出 tokens |
+| input_cost_per_1k | DECIMAL | 输入成本 |
+| output_cost_per_1k | DECIMAL | 输出成本 |
+| allowed_roles | JSON | 允许的角色列表 |
 
-class ModelConfig(BaseModel):
-    """模型配置"""
-    id: str
-    name: str  # claude-opus-4-6, claude-sonnet-4-5...
-    display_name: str  # Claude Opus 4, Claude Sonnet 4...
-    is_enabled: bool = True
+### 8.2 模型配置功能
+
+| 功能 | 说明 |
+|------|------|
+| 模型列表 | 管理员配置可用模型 |
+| 默认模型 | 系统默认 + 用户个人默认 |
+| 权限控制 | 不同角色可用不同模型 |
+| 成本显示 | 显示各模型成本信息 |
+
+### 8.3 模型选择流程
+
+```mermaid
+flowchart TD
+    START["用户发起对话"] --> CHECK_USER["检查用户个人设置"]
     
-    # 模型参数
-    default_temperature: float = 0.7
-    max_output_tokens: int = 4096
+    CHECK_USER --> HAS_DEFAULT{"有个人默认模型?"}
+    HAS_DEFAULT -->|"是"| USER_MODEL["使用用户默认模型"]
+    HAS_DEFAULT -->|"否"| CHECK_SYSTEM["获取系统默认模型"]
     
-    # 成本信息（用于显示）
-    input_cost_per_1k: float  # 美元/1k tokens
-    output_cost_per_1k: float
+    CHECK_SYSTEM --> CHECK_ROLE{"角色允许该模型?"}
+    CHECK_ROLE -->|"是"| FINAL["使用该模型"]
+    CHECK_ROLE -->|"否"| FALLBACK["使用 fallback 模型"]
     
-    # 权限控制
-    allowed_roles: list[str] = ["user", "admin", "super_admin"]  # 哪些角色可用
-
-class SystemModelSettings(BaseModel):
-    """系统级模型设置"""
-    default_model: str = "claude-sonnet-4-5"
-    fallback_model: str = "claude-haiku-4-5"  # 失败时的备用模型
-    max_tokens_limit: int = 100000  # 单 Session 最大 tokens
+    USER_MODEL --> CHECK_ROLE2{"角色允许该模型?"}
+    CHECK_ROLE2 -->|"是"| FINAL
+    CHECK_ROLE2 -->|"否"| CHECK_SYSTEM
     
-    # 模型列表
-    available_models: list[ModelConfig] = []
-```
-
-### 8.2 模型配置 API
-
-```python
-# api/config.py
-from fastapi import APIRouter, Depends
-
-router = APIRouter(prefix="/api/config", tags=["配置"])
-
-@router.get("/models")
-async def get_models(user: User = Depends(get_current_user)):
-    """获取可用模型列表（根据用户角色过滤）"""
-    all_models = await get_all_model_configs()
-    
-    # 根据用户角色过滤
-    available = [
-        m for m in all_models 
-        if m.is_enabled and user.role in m.allowed_roles
-    ]
-    return available
-
-@router.put("/models")
-async def update_models(
-    req: UpdateModelsRequest,
-    user: User = Depends(require_admin)
-):
-    """更新模型配置（管理员）"""
-    await update_model_configs(req.models)
-    return {"success": True}
-
-@router.get("/default-model")
-async def get_default_model(user: User = Depends(get_current_user)):
-    """获取用户的默认模型"""
-    # 用户个人设置优先
-    if user.settings.default_model:
-        return {"model": user.settings.default_model}
-    # 否则用系统默认
-    system_default = await get_system_default_model()
-    return {"model": system_default}
-
-@router.put("/default-model")
-async def set_default_model(
-    req: SetDefaultModelRequest,
-    user: User = Depends(get_current_user)
-):
-    """设置用户默认模型"""
-    # 验证模型可用
-    models = await get_models(user)
-    if req.model not in [m.name for m in models]:
-        raise HTTPException(400, "模型不可用")
-    
-    await update_user_settings(user.id, {"default_model": req.model})
-    return {"success": True}
-```
-
-### 8.3 动态模型切换
-
-```python
-# services/agent_manager.py
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-
-class AgentManager:
-    """Agent 实例管理"""
-    
-    async def create_agent(
-        session_id: str,
-        user: User,
-        model: str = None
-    ):
-        """创建 Agent 实例"""
-        # 获取配置
-        model = model or user.settings.default_model
-        agent_type = await get_session_agent_type(session_id)
-        agent_config = await get_agent_config(agent_type)
-        
-        # 构建 Options
-        options = ClaudeAgentOptions(
-            system_prompt=agent_config.system_prompt,
-            allowed_tools=agent_config.allowed_tools,
-            model=model,
-            permission_mode=user.settings.permission_mode,
-            session_store=DatabaseSessionStore(session_id, user.id)
-        )
-        
-        return ClaudeSDKClient(options=options)
-    
-    async def switch_model(self, client: ClaudeSDKClient, new_model: str):
-        """动态切换模型"""
-        await client.set_model(new_model)
+    FINAL --> CREATE["创建 Agent"]
 ```
 
 ---
 
 ## 9. Agent 模块设计
 
-### 9.1 Agent 类型管理
+### 9.1 Agent 类型
 
-```python
-# models/agent.py
-from pydantic import BaseModel
-from typing import Optional
+| Agent 类型 | 主要能力 | 建议模型 |
+|------------|----------|----------|
+| Assistant | 通用助手 | claude-sonnet-4-5 |
+| Researcher | 信息检索、分析、报告 | claude-sonnet-4-5 |
+| Coder | 代码开发、调试、测试 | claude-sonnet-4-5 |
+| Coordinator | 任务分解、分配、监控 | claude-opus-4-6 |
 
-class AgentTypeConfig(BaseModel):
-    """Agent 类型配置"""
-    id: str
-    name: str  # researcher, coder, assistant...
-    display_name: str  # 研究员, 编码助手...
-    description: str
+### 9.2 Agent 配置数据模型
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | 配置 ID |
+| name | VARCHAR(50) | Agent 名称（researcher） |
+| display_name | VARCHAR(100) | 显示名称（研究员） |
+| description | TEXT | 描述 |
+| system_prompt | TEXT | System Prompt |
+| allowed_tools | JSON | 允许的工具列表 |
+| disallowed_tools | JSON | 禁用的工具列表 |
+| default_model | VARCHAR(50) | 默认模型 |
+| allowed_roles | JSON | 允许的角色 |
+| is_enabled | BOOLEAN | 是否启用 |
+
+### 9.3 Agent 配置流程
+
+```mermaid
+flowchart TD
+    ADMIN["管理员"] --> CONFIG["后台配置 Agent"]
+    CONFIG --> DB["保存到 agent_types 表"]
     
-    # Agent 定义
-    system_prompt: str
-    allowed_tools: list[str]
-    disallowed_tools: list[str] = []
-    default_model: str = "claude-sonnet-4-5"
-    
-    # 权限
-    allowed_roles: list[str] = ["user", "admin"]
-    
-    # 是否启用
-    is_enabled: bool = True
-
-# 存储 Agent 类型配置到数据库
-# 管理员可在后台页面编辑
-```
-
-### 9.2 Agent 动态加载
-
-```python
-# services/agent_loader.py
-from claude_agent_sdk import AgentDefinition
-
-async def load_agent_configs() -> dict[str, AgentDefinition]:
-    """从数据库加载 Agent 配置"""
-    configs = await db.query("SELECT * FROM agent_types WHERE is_enabled = true")
-    
-    return {
-        c.name: AgentDefinition(
-            name=c.name,
-            system_prompt=c.system_prompt,
-            allowed_tools=c.allowed_tools,
-            disallowed_tools=c.disallowed_tools,
-            model=c.default_model
-        )
-        for c in configs
-    }
-
-async def get_agent_options(
-    agent_type: str,
-    user: User
-) -> ClaudeAgentOptions:
-    """获取指定 Agent 的 Options"""
-    config = await get_agent_config(agent_type)
-    
-    return ClaudeAgentOptions(
-        system_prompt=config.system_prompt,
-        allowed_tools=config.allowed_tools,
-        disallowed_tools=config.disallowed_tools,
-        model=user.settings.default_model,
-        permission_mode=user.settings.permission_mode,
-        session_store=DatabaseSessionStore(session_id, user.id),
-        hooks=await load_hooks_for_user(user)
-    )
+    USER["用户发起对话"] --> SELECT["选择 Agent 类型"]
+    SELECT --> LOAD["从 DB 加载配置"]
+    LOAD --> BUILD["构建 ClaudeAgentOptions"]
+    BUILD --> CREATE["创建 ClaudeSDKClient"]
+    CREATE --> RUN["运行 Agent"]
 ```
 
 ---
 
 ## 10. 工具系统设计
 
-### 10.1 工具配置管理
+### 10.1 工具来源
 
-```python
-# models/tool.py
-from pydantic import BaseModel
+| 来源 | 说明 |
+|------|------|
+| SDK 内置 | 30+ 工具（Bash, Read, Write, Edit, WebSearch...） |
+| 自定义工具 | SDK MCP Server（in-process） |
+| 外部 MCP Server | 配置的外部 MCP 服务 |
 
-class ToolConfig(BaseModel):
-    """工具配置"""
-    name: str
-    description: str
-    is_builtin: bool  # 内置工具 vs 自定义工具
-    is_enabled: bool = True
-    
-    # 权限规则
-    allowed_roles: list[str] = ["user"]
-    requires_confirmation: bool = False  # 是否需要用户确认
-    
-    # MCP Server 来源（如果是 MCP 工具）
-    mcp_server: Optional[str] = None
+### 10.2 工具配置数据模型
 
-class MCPServerConfig(BaseModel):
-    """MCP Server 配置"""
-    id: str
-    name: str
-    command: str  # 启动命令
-    args: list[str] = []
-    env: dict[str, str] = {}
-    is_enabled: bool = True
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | 配置 ID |
+| name | VARCHAR(50) | 工具名称 |
+| description | TEXT | 描述 |
+| is_builtin | BOOLEAN | 是否内置工具 |
+| is_enabled | BOOLEAN | 是否启用 |
+| allowed_roles | JSON | 允许的角色 |
+| requires_confirmation | BOOLEAN | 是否需要确认 |
+| mcp_server | VARCHAR(50) | 来源 MCP Server |
 
-### 10.2 工具权限控制
+### 10.3 工具权限控制流程
 
-```python
-# services/tool_permissions.py
-
-async def get_allowed_tools(user: User, agent_type: str) -> list[str]:
-    """获取用户可用的工具列表"""
-    # 1. Agent 类型允许的工具
-    agent_config = await get_agent_config(agent_type)
-    agent_tools = set(agent_config.allowed_tools)
+```mermaid
+flowchart TD
+    TOOL_CALL["工具调用请求"] --> CHECK_AGENT["检查 Agent 允许的工具"]
     
-    # 2. 用户角色允许的工具
-    all_tools = await get_all_tool_configs()
-    role_tools = {
-        t.name for t in all_tools
-        if t.is_enabled and user.role in t.allowed_roles
-    }
+    CHECK_AGENT --> AGENT_ALLOW{"Agent 允许?"}
+    AGENT_ALLOW -->|"否"| DENY["拒绝"]
+    AGENT_ALLOW -->|"是"| CHECK_ROLE["检查用户角色权限"]
     
-    # 3. 用户个人设置的工具
-    user_tools = set(user.settings.allowed_tools) if user.settings.allowed_tools else role_tools
+    CHECK_ROLE --> ROLE_ALLOW{"角色允许?"}
+    ROLE_ALLOW -->|"否"| DENY
+    ROLE_ALLOW -->|"是"| CHECK_USER["检查用户个人设置"]
     
-    # 交集
-    return list(agent_tools & role_tools & user_tools)
-
-async def check_tool_permission(
-    tool_name: str,
-    user: User,
-    session_id: str
-) -> bool:
-    """检查工具执行权限"""
-    tool_config = await get_tool_config(tool_name)
+    CHECK_USER --> USER_ALLOW{"用户允许?"}
+    USER_ALLOW -->|"否"| DENY
+    USER_ALLOW -->|"是"| CHECK_CONFIRM{"需要确认?"}
     
-    if not tool_config.is_enabled:
-        return False
+    CHECK_CONFIRM -->|"是"| ASK["前端弹出确认"]
+    CHECK_CONFIRM -->|"否"| EXECUTE["执行工具"]
     
-    if user.role not in tool_config.allowed_roles:
-        return False
-    
-    if tool_config.requires_confirmation:
-        # 需要前端确认
-        await request_user_confirmation(session_id, tool_name)
-    
-    return True
+    ASK --> USER_DECIDE{"用户决定"}
+    USER_DECIDE -->|"允许"| EXECUTE
+    USER_DECIDE -->|"拒绝"| DENY
 ```
 
 ---
 
 ## 11. 项目目录结构
 
-### 11.1 完整项目结构
-
 ```
 agent_platform/
 ├── frontend/                    # 前端应用
 │   ├── src/
-│   │   ├── pages/
-│   │   │   ├── Login.tsx
-│   │   │   ├── Chat.tsx
-│   │   │   ├── Settings/
-│   │   │   │   ├── Models.tsx
-│   │   │   │   ├── Agents.tsx
-│   │   │   │   ├── Tools.tsx
-│   │   │   │   ├── Users.tsx
-│   │   │   │   └── System.tsx
-│   │   ├── components/
-│   │   ├── hooks/
-│   │   ├── stores/
-│   │   ├── services/
-│   │   ├── types/
+│   │   ├── pages/               # 页面组件
+│   │   ├── components/          # 公共组件
+│   │   ├── hooks/               # React Hooks
+│   │   ├── stores/              # 状态管理
+│   │   ├── services/            # API 服务
+│   │   ├── types/               # TypeScript 类型
 │   │   ├── App.tsx
 │   │   └── main.tsx
 │   ├── package.json
 │   └── vite.config.ts
 │
 ├── backend/                     # 后端服务
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── auth.py              # 认证 API
-│   │   ├── users.py             # 用户 API
-│   │   ├── sessions.py          # Session API
-│   │   ├── chat.py              # 聊天 API
-│   │   ├── config.py            # 配置 API
-│   │   └── agents.py            # Agent API
-│   │
-│   ├── models/
-│   │   ├── __init__.py
-│   │   ├── user.py              # 用户模型
-│   │   ├── session.py           # Session 模型
-│   │   ├── config.py            # 配置模型
-│   │   ├── agent.py             # Agent 模型
-│   │   └── tool.py              # 工具模型
-│   │
-│   ├── services/
-│   │   ├── __init__.py
-│   │   ├── user_manager.py      # 用户管理
-│   │   ├── session_manager.py   # Session 管理
-│   │   ├── session_store.py     # Session 存储
-│   │   ├── agent_manager.py     # Agent 管理
-│   │   ├── agent_loader.py      # Agent 配置加载
-│   │   ├── config_manager.py    # 配置管理
-│   │   └── tool_permissions.py  # 工具权限
-│   │
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── database.py          # 数据库连接
-│   │   ├── redis.py             # Redis 连接
-│   │   ├── auth.py              # JWT 认证
-│   │   └── security.py          # 安全工具
-│   │
+│   ├── api/                     # API 路由
+│   ├── models/                  # 数据模型
+│   ├── services/                # 业务服务
+│   ├── core/                    # 核心模块
 │   ├── tools/                   # 自定义工具
-│   │   ├── __init__.py
-│   │   ├── registry.py
-│   │   ├── database.py
-│   │   └── notification.py
-│   │
 │   ├── hooks/                   # 业务 Hooks
-│   │   ├── __init__.py
-│   │   ├── audit.py
-│   │   └── policy.py
-│   │
 │   ├── migrations/              # 数据库迁移
-│   │   ├── 001_init.py
-│   │   └── 002_add_agent_types.py
-│   │
-│   ├── main.py                  # FastAPI 入口
-│   ├── config.py                # 服务配置
+│   ├── main.py                  # 入口
 │   └── requirements.txt
 │
-├── docker/
+├── docker/                      # Docker 配置
 │   ├── docker-compose.yml
 │   ├── frontend.Dockerfile
 │   ├── backend.Dockerfile
 │   └── nginx.conf
 │
-├── docs/
-│   ├── api.md                   # API 文档
-│   ├── frontend.md              # 前端文档
-│   └── deployment.md            # 部署文档
+├── docs/                        # 文档
+│   ├── api.md
+│   ├── frontend.md
+│   └── deployment.md
 │
-├── scripts/
-│   ├── init_db.py               # 初始化数据库
-│   └── seed_data.py             # 种子数据
+├── scripts/                     # 脚本
+│   ├── init_db.py
+│   └── seed_data.py
 │
 └── README.md
 ```
@@ -1296,551 +764,126 @@ agent_platform/
 
 ## 12. 数据库设计（MySQL）
 
-### 12.1 DB Session 与 SDK Session 关联机制
+### 12.1 数据表概览
 
-**两种 Session 的区别：**
+| 表名 | 说明 |
+|------|------|
+| users | 用户表 |
+| sessions | Session 元数据表 |
+| agent_types | Agent 类型配置表 |
+| model_configs | 模型配置表 |
+| tool_configs | 工具配置表 |
+| mcp_servers | MCP Server 配置表 |
+| system_config | 系统配置表 |
+
+### 12.2 Session 存储架构
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Session 架构说明                                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  DB Session (MySQL)                     SDK Session (SessionStore)          │
-│  ┌──────────────────────┐              ┌──────────────────────────┐         │
-│  │ 业务层面的"对话"      │              │ Agent 内部的对话上下文    │         │
-│  │                      │              │                          │         │
-│  │ - session_id (UUID)  │─────────────→│ - session_id (同一个ID)   │         │
-│  │ - user_id            │   关联标识   │ - messages (消息列表)     │         │
-│  │ - title              │              │ - context (上下文)        │         │
-│  │ - model              │              │ - metadata               │         │
-│  │ - agent_type         │              │                          │         │
-│  │ - created_at         │              │ 存储位置:                 │         │
-│  │ - token统计          │              │ - Redis (活跃Session)     │         │
-│  │                      │              │ - 文件 (历史Session)      │         │
-│  └──────────────────────┘              └──────────────────────────┘         │
-│                                                                             │
-│  用途:                                   用途:                               │
-│  - 用户查看历史对话列表                   - Agent 多轮对话上下文管理           │
-│  - Session 元数据管理                    - 会话恢复与继续                     │
-│  - 权限验证                              - 消息持久化                         │
-│  - 成本统计                                                                   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Session 存储架构                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  数据类型           存储位置           用途                      │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                 │
+│  Session 元数据      MySQL              用户历史列表              │
+│  - id, title       sessions表         权限验证                  │
+│  - model, type                        成本统计                  │
+│  - token统计                                                   │
+│                                                                 │
+│  Session 消息内容    Redis + 文件       Agent 对话上下文          │
+│  - messages        (SessionStore)      会话恢复                  │
+│  - context                            消息持久化                │
+│                                                                 │
+│  关联方式:                                                       │
+│  MySQL sessions.id = SessionStore.session_id                    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**关联流程：**
+### 12.3 数据表字段设计
 
-```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant API as API
-    participant DB as MySQL
-    participant SessionMgr as SessionManager
-    participant AgentMgr as AgentManager
-    participant SDK as Claude SDK
-    participant Store as SessionStore
+**用户表：**
 
-    User->>API: 点击"新建对话"
-    API->>DB: INSERT INTO sessions (user_id, ...)
-    DB-->>API: session_id = "abc-123"
-    
-    Note over API,Store: DB Session 创建完成，返回 session_id
-    
-    User->>API: 发送第一条消息 (session_id="abc-123")
-    API->>SessionMgr: 获取 Session 信息
-    SessionMgr->>DB: SELECT * FROM sessions WHERE id="abc-123"
-    DB-->>SessionMgr: Session 元数据
-    
-    API->>AgentMgr: 创建 Agent (session_id="abc-123")
-    AgentMgr->>Store: SessionStore("abc-123", user_id)
-    
-    Note over Store: 用 DB session_id 作为 Store 的标识
-    
-    AgentMgr->>SDK: ClaudeSDKClient(session_store=Store)
-    
-    SDK->>Store: 加载历史消息 (如果存在)
-    Store-->>SDK: messages=[] (新Session为空)
-    
-    SDK->>SDK: 执行对话
-    SDK->>Store: 保存 messages
-    
-    Note over Store,SDK: 每轮对话后，SDK 自动保存到 Store
-    
-    loop 对话结束
-        AgentMgr->>DB: UPDATE sessions SET tokens=..., cost=...
-    end
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | VARCHAR(36) | UUID |
+| username | VARCHAR(50) | 用户名 |
+| email | VARCHAR(100) | 邮箱 |
+| password_hash | VARCHAR(255) | 密码哈希 |
+| role | VARCHAR(20) | 角色 |
+| settings | JSON | 个人设置 |
+| created_at | TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | 更新时间 |
 
-**核心代码实现：**
+**Session 表 (sessions)：**
 
-```python
-# services/session_store.py
-from claude_agent_sdk import SessionStore
-import json
-import os
-
-class MySQLSessionStore(SessionStore):
-    """
-    自定义 SessionStore，关联 DB Session
-    
-    关联机制：
-    1. DB Session 的 id 作为 SDK SessionStore 的 session_id
-    2. SessionStore 负责存储 messages (对话内容)
-    3. MySQL 负责存储 metadata (元数据)
-    """
-    
-    def __init__(self, session_id: str, user_id: str):
-        self.session_id = session_id  # 来自 DB Session.id
-        self.user_id = user_id
-        self.redis_key = f"session:{user_id}:{session_id}"
-        self.file_path = f"/data/sessions/{user_id}/{session_id}.json"
-    
-    async def save(self, messages: list, metadata: dict):
-        """
-        保存对话内容
-        
-        存储策略：
-        1. Redis 缓存（活跃 Session，快速访问）
-        2. 文件持久化（历史 Session）
-        """
-        # 保存到 Redis（活跃时使用）
-        await redis_client.set(
-            self.redis_key,
-            json.dumps({"messages": messages, "metadata": metadata}),
-            ex=3600 * 24  # 24小时过期
-        )
-        
-        # 异步写入文件（持久化）
-        await self._save_to_file(messages, metadata)
-        
-        # 更新 DB Session 的统计信息
-        await self._update_db_stats(metadata)
-    
-    async def load(self) -> tuple[list, dict]:
-        """
-        加载对话内容
-        
-        加载策略：
-        1. 先从 Redis 读（最快）
-        2. Redis 没有，从文件读
-        3. 都没有，返回空（新 Session）
-        """
-        # 1. 从 Redis 读
-        data = await redis_client.get(self.redis_key)
-        if data:
-            return json.loads(data)
-        
-        # 2. 从文件读
-        if os.path.exists(self.file_path):
-            with open(self.file_path) as f:
-                return json.load(f)
-        
-        # 3. 新 Session
-        return [], {}
-    
-    async def _save_to_file(self, messages, metadata):
-        """写入文件"""
-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-        with open(self.file_path, 'w') as f:
-            json.dump({
-                "session_id": self.session_id,
-                "messages": messages,
-                "metadata": metadata
-            }, f)
-    
-    async def _update_db_stats(self, metadata):
-        """更新 DB Session 统计"""
-        # 更新 MySQL 中的 token 统计
-        await db.execute("""
-            UPDATE sessions 
-            SET total_input_tokens = total_input_tokens + :input_tokens,
-                total_output_tokens = total_output_tokens + :output_tokens,
-                total_cost = total_cost + :cost,
-                updated_at = NOW()
-            WHERE id = :session_id
-        """, {
-            "session_id": self.session_id,
-            "input_tokens": metadata.get("input_tokens", 0),
-            "output_tokens": metadata.get("output_tokens", 0),
-            "cost": metadata.get("cost", 0)
-        })
-```
-
-**SessionManager 整合：**
-
-```python
-# services/session_manager.py
-
-class SessionManager:
-    """
-    Session 管理器，协调 DB Session 和 SDK SessionStore
-    """
-    
-    async def create_session(self, user_id: str, model: str, agent_type: str) -> str:
-        """
-        创建新 Session
-        
-        流程：
-        1. 在 MySQL 创建 DB Session（获取 session_id）
-        2. session_id 将作为 SDK SessionStore 的标识
-        """
-        # 1. 创建 DB Session
-        result = await db.execute("""
-            INSERT INTO sessions (user_id, model, agent_type, status)
-            VALUES (:user_id, :model, :agent_type, 'active')
-        """, {"user_id": user_id, "model": model, "agent_type": agent_type})
-        
-        session_id = result.lastrowid  # 或用 UUID
-        
-        # 2. 返回 session_id（后续用于创建 SessionStore）
-        return session_id
-    
-    async def get_session(self, session_id: str, user_id: str) -> dict:
-        """
-        获取 Session 信息
-        
-        返回：
-        - DB Session 元数据（来自 MySQL）
-        - messages 内容（来自 SessionStore）
-        """
-        # 1. 从 MySQL 获取元数据
-        db_session = await db.fetch_one("""
-            SELECT * FROM sessions WHERE id = :id AND user_id = :user_id
-        """, {"id": session_id, "user_id": user_id})
-        
-        if not db_session:
-            raise SessionNotFoundError()
-        
-        # 2. 从 SessionStore 获取消息内容
-        store = MySQLSessionStore(session_id, user_id)
-        messages, context = await store.load()
-        
-        # 3. 合并返回
-        return {
-            "session": db_session,
-            "messages": messages,
-            "context": context
-        }
-    
-    async def list_user_sessions(self, user_id: str, status: str = "active") -> list:
-        """
-        获取用户的 Session 列表
-        
-        只查询 MySQL 元数据（不需要加载消息内容）
-        """
-        sessions = await db.fetch_all("""
-            SELECT id, title, model, agent_type, status, 
-                   total_input_tokens, total_output_tokens, total_cost,
-                   created_at, updated_at
-            FROM sessions 
-            WHERE user_id = :user_id AND status = :status
-            ORDER BY updated_at DESC
-            LIMIT 100
-        """, {"user_id": user_id, "status": status})
-        
-        return sessions
-    
-    async def delete_session(self, session_id: str, user_id: str):
-        """
-        删除 Session
-        
-        同时删除：
-        1. MySQL 记录
-        2. Redis 缓存
-        3. 文件存储
-        """
-        # 1. 删除 MySQL
-        await db.execute("""
-            UPDATE sessions SET status = 'deleted', deleted_at = NOW()
-            WHERE id = :id AND user_id = :user_id
-        """, {"id": session_id, "user_id": user_id})
-        
-        # 2. 删除 Redis
-        redis_key = f"session:{user_id}:{session_id}"
-        await redis_client.delete(redis_key)
-        
-        # 3. 删除文件（可选）
-        file_path = f"/data/sessions/{user_id}/{session_id}.json"
-        if os.path.exists(file_path):
-            os.remove(file_path)
-```
-
-**Agent 创建时关联：**
-
-```python
-# services/agent_manager.py
-
-async def create_agent_for_session(session_id: str, user: User):
-    """
-    为指定 Session 创建 Agent
-    
-    关联流程：
-    1. 用 session_id 创建 SessionStore
-    2. SessionStore 会自动加载历史消息（如果有）
-    3. Agent 使用 SessionStore 管理对话上下文
-    """
-    # 1. 获取 DB Session 配置
-    db_session = await session_manager.get_session_meta(session_id)
-    
-    # 2. 获取 Agent 配置
-    agent_config = await get_agent_config(db_session.agent_type)
-    
-    # 3. 创建 SessionStore（关联 DB session_id）
-    session_store = MySQLSessionStore(session_id, user.id)
-    
-    # 4. 构建 Agent Options
-    options = ClaudeAgentOptions(
-        system_prompt=agent_config.system_prompt,
-        allowed_tools=await get_allowed_tools(user, db_session.agent_type),
-        model=db_session.model or user.settings.default_model,
-        permission_mode=user.settings.permission_mode,
-        session_store=session_store,  # 关联 SessionStore
-    )
-    
-    # 5. 创建 Agent
-    return ClaudeSDKClient(options=options)
-```
-
----
-
-### 12.2 MySQL 数据表设计
-
-**用户表 (users)：**
-
-```sql
-CREATE TABLE users (
-    id VARCHAR(36) PRIMARY KEY,  -- UUID
-    username VARCHAR(50) UNIQUE NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    role VARCHAR(20) DEFAULT 'user',  -- user, admin, super_admin
-    settings JSON DEFAULT NULL,        -- 用户个人设置 {"default_model": "...", "permission_mode": "..."}
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP NULL,
-    
-    INDEX idx_users_email (email),
-    INDEX idx_users_username (username)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-
-**Session 表 (sessions) - 业务 Session 元数据：**
-
-```sql
-CREATE TABLE sessions (
-    id VARCHAR(36) PRIMARY KEY,  -- UUID，作为 SDK SessionStore 的标识
-    user_id VARCHAR(36) NOT NULL,
-    title VARCHAR(200) DEFAULT '新对话',
-    model VARCHAR(50) DEFAULT 'claude-sonnet-4-5',
-    agent_type VARCHAR(50) DEFAULT 'assistant',
-    status VARCHAR(20) DEFAULT 'active',  -- active, archived, deleted
-    
-    -- Token 统计（用于成本追踪）
-    total_input_tokens INT DEFAULT 0,
-    total_output_tokens INT DEFAULT 0,
-    total_cost DECIMAL(10, 4) DEFAULT 0.0,
-    
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP NULL,
-    
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    INDEX idx_sessions_user_id (user_id),
-    INDEX idx_sessions_status (status),
-    INDEX idx_sessions_updated_at (updated_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | VARCHAR(36) | Session ID（关联 SDK） |
+| user_id | VARCHAR(36) | 用户 ID |
+| title | VARCHAR(200) | 标题 |
+| model | VARCHAR(50) | 模型 |
+| agent_type | VARCHAR(50) | Agent 类型 |
+| status | VARCHAR(20) | 状态 |
+| total_input_tokens | INT | 输入 tokens |
+| total_output_tokens | INT | 输出 tokens |
+| total_cost | DECIMAL(10,4) | 成本 |
+| created_at | TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | 更新时间 |
 
 **Agent 类型表 (agent_types)：**
 
-```sql
-CREATE TABLE agent_types (
-    id VARCHAR(36) PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL,        -- researcher, coder, assistant...
-    display_name VARCHAR(100) NOT NULL,      -- 研究员, 编码助手...
-    description TEXT,
-    system_prompt TEXT NOT NULL,
-    allowed_tools JSON DEFAULT NULL,         -- ["WebSearch", "WebFetch"]
-    disallowed_tools JSON DEFAULT NULL,      -- ["Bash"]
-    default_model VARCHAR(50) DEFAULT 'claude-sonnet-4-5',
-    allowed_roles JSON DEFAULT NULL,         -- ["user", "admin"]
-    is_enabled BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    INDEX idx_agent_types_name (name),
-    INDEX idx_agent_types_enabled (is_enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | VARCHAR(36) | UUID |
+| name | VARCHAR(50) | Agent 名称 |
+| display_name | VARCHAR(100) | 显示名称 |
+| description | TEXT | 描述 |
+| system_prompt | TEXT | System Prompt |
+| allowed_tools | JSON | 允许工具 |
+| disallowed_tools | JSON | 禁用工具 |
+| default_model | VARCHAR(50) | 默认模型 |
+| allowed_roles | JSON | 允许角色 |
+| is_enabled | BOOLEAN | 是否启用 |
 
 **模型配置表 (model_configs)：**
 
-```sql
-CREATE TABLE model_configs (
-    id VARCHAR(36) PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL,        -- claude-opus-4-6
-    display_name VARCHAR(100) NOT NULL,      -- Claude Opus 4
-    is_enabled BOOLEAN DEFAULT TRUE,
-    default_temperature DECIMAL(3, 2) DEFAULT 0.7,
-    max_output_tokens INT DEFAULT 4096,
-    input_cost_per_1k DECIMAL(10, 4),        -- 输入 token 成本
-    output_cost_per_1k DECIMAL(10, 4),       -- 输出 token 成本
-    allowed_roles JSON DEFAULT NULL,         -- ["user", "admin", "super_admin"]
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    INDEX idx_model_configs_name (name),
-    INDEX idx_model_configs_enabled (is_enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | VARCHAR(36) | UUID |
+| name | VARCHAR(50) | 模型名 |
+| display_name | VARCHAR(100) | 显示名 |
+| is_enabled | BOOLEAN | 是否启用 |
+| default_temperature | DECIMAL(3,2) | 温度 |
+| max_output_tokens | INT | 最大 tokens |
+| input_cost_per_1k | DECIMAL(10,4) | 输入成本 |
+| output_cost_per_1k | DECIMAL(10,4) | 输出成本 |
+| allowed_roles | JSON | 允许角色 |
 
 **工具配置表 (tool_configs)：**
 
-```sql
-CREATE TABLE tool_configs (
-    id VARCHAR(36) PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL,
-    description TEXT,
-    is_builtin BOOLEAN DEFAULT FALSE,        -- 内置工具 vs 自定义工具
-    is_enabled BOOLEAN DEFAULT TRUE,
-    allowed_roles JSON DEFAULT NULL,         -- ["user"]
-    requires_confirmation BOOLEAN DEFAULT FALSE,
-    mcp_server VARCHAR(50) NULL,             -- 来源 MCP Server
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    INDEX idx_tool_configs_name (name),
-    INDEX idx_tool_configs_enabled (is_enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | VARCHAR(36) | UUID |
+| name | VARCHAR(50) | 工具名 |
+| description | TEXT | 描述 |
+| is_builtin | BOOLEAN | 是否内置 |
+| is_enabled | BOOLEAN | 是否启用 |
+| allowed_roles | JSON | 允许角色 |
+| requires_confirmation | BOOLEAN | 需确认 |
+| mcp_server | VARCHAR(50) | MCP 来源 |
 
 **MCP Server 配置表 (mcp_servers)：**
 
-```sql
-CREATE TABLE mcp_servers (
-    id VARCHAR(36) PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL,
-    command TEXT NOT NULL,                   -- 启动命令
-    args JSON DEFAULT NULL,                  -- ["--port", "8080"]
-    env JSON DEFAULT NULL,                   -- {"API_KEY": "..."}
-    is_enabled BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    INDEX idx_mcp_servers_name (name),
-    INDEX idx_mcp_servers_enabled (is_enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-
-**系统配置表 (system_config)：**
-
-```sql
-CREATE TABLE system_config (
-    config_key VARCHAR(50) PRIMARY KEY,
-    config_value JSON NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- 默认配置
-INSERT INTO system_config (config_key, config_value) VALUES
-('default_model', '"claude-sonnet-4-5"'),
-('fallback_model', '"claude-haiku-4-5"'),
-('max_tokens_limit', '100000'),
-('api_keys', '{"anthropic": "..."}');
-```
-
-**Session 消息索引表 (可选) - 用于搜索：**
-
-```sql
-CREATE TABLE session_messages (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    session_id VARCHAR(36) NOT NULL,
-    message_id VARCHAR(36) NOT NULL,
-    role VARCHAR(20) NOT NULL,               -- user, assistant, tool
-    content_type VARCHAR(20),                 -- text, tool_use, tool_result
-    content_preview VARCHAR(500),             -- 内容摘要（用于搜索）
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (session_id) REFERENCES sessions(id),
-    INDEX idx_messages_session (session_id),
-    INDEX idx_messages_created (created_at),
-    FULLTEXT INDEX ft_messages_content (content_preview)  -- 全文搜索
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-
----
-
-### 12.3 Session 存储架构总结
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Session 存储架构                                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  数据类型              存储位置            用途                              │
-│  ─────────────────────────────────────────────────────────────────────────  │
-│                                                                             │
-│  Session 元数据         MySQL              用户查看历史列表                   │
-│  - id, title           sessions表         权限验证                          │
-│  - model, agent_type                      成本统计                          │
-│  - token 统计                                                               │
-│                                                                             │
-│  Session 消息内容       Redis + 文件       Agent 对话上下文                  │
-│  - messages            (SessionStore)      会话恢复                          │
-│  - context                                消息持久化                        │
-│                                                                             │
-│  关联方式:                                                                   │
-│  MySQL sessions.id = SessionStore.session_id                                │
-│                                                                             │
-│  查询历史列表:                                                               │
-│  SELECT * FROM sessions WHERE user_id = ? AND status = 'active'             │
-│  （只查 MySQL，不加载消息内容，快速）                                         │
-│                                                                             │
-│  查看具体对话:                                                               │
-│  1. SELECT * FROM sessions WHERE id = ?  （获取元数据）                      │
-│  2. SessionStore.load()                     （获取消息内容）                  │
-│                                                                             │
-│  启动 Agent:                                                                 │
-│  SessionStore = MySQLSessionStore(session_id=mysql_session.id)              │
-│  ClaudeSDKClient(session_store=SessionStore)                                │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-### 12.4 MySQL 连接配置
-
-```python
-# core/database.py
-from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-
-# MySQL 连接配置（使用 aiomysql 支持异步）
-DATABASE_URL = "mysql+aiomysql://user:password@localhost:3306/agent_platform?charset=utf8mb4"
-
-engine = create_async_engine(
-    DATABASE_URL, 
-    echo=True,
-    pool_size=10,
-    max_overflow=20,
-    pool_recycle=3600
-)
-
-async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-async def get_db():
-    async with async_session() as session:
-        yield session
-
-# Redis 连接
-import aioredis
-
-REDIS_URL = "redis://localhost:6379/0"
-
-redis_client = aioredis.from_url(REDIS_URL)
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | VARCHAR(36) | UUID |
+| name | VARCHAR(50) | Server 名 |
+| command | TEXT | 启动命令 |
+| args | JSON | 参数 |
+| env | JSON | 环境变量 |
+| is_enabled | BOOLEAN | 是否启用 |
 
 ---
 
@@ -1857,147 +900,7 @@ redis_client = aioredis.from_url(REDIS_URL)
 | Phase 5 | 第 5 周 | 自定义工具 + Hooks | 业务工具集成 |
 | Phase 6 | 第 6 周 | 测试 + 部署 | 完整系统上线 |
 
-### 13.2 详细任务分解
-
-**Phase 1: 后端基础 + 用户系统（第 1 周）**
-
-```
-Day 1-2: 项目初始化
-├── 创建项目目录结构
-├── 初始化数据库（MySQL）
-├── 配置 Redis
-├── 初始化 FastAPI 项目
-└── 编写数据库表定义
-
-Day 3-4: 用户系统
-├── 实现用户注册 API
-├── 实现用户登录 API（JWT）
-├── 实现用户管理 API（管理员）
-├── 编写认证中间件
-└── 单元测试
-
-Day 5: 验证与文档
-├── API 文档生成（Swagger）
-├── 测试用户 CRUD 流程
-└── 编写 README
-```
-
-**Phase 2: Session 管理 + Agent 核心（第 2 周）**
-
-```
-Day 1-2: Session 管理
-├── 实现 Session Store（Redis + 文件）
-├── 实现 Session CRUD API
-├── 实现 Session 列表查询
-├── Session 权限验证
-
-Day 3-4: Agent 核心
-├── 集成 Claude Agent SDK
-├── 实现 AgentManager
-├── 实现 WebSocket 聊天 API
-├── 流式消息处理
-
-Day 5: 集成测试
-├── 测试完整对话流程
-├── 测试 Session 持久化
-├── 性能测试
-```
-
-**Phase 3: 前端聊天页面（第 3 周）**
-
-```
-Day 1-2: 基础框架
-├── 初始化 React 项目
-├── 配置路由
-├── 实现登录页面
-├── 实现认证逻辑
-
-Day 3-4: 聊天 UI
-├── Session 历史侧边栏
-├── 消息列表组件
-├── 流式消息渲染
-├── 工具调用展示
-├── WebSocket 连接
-
-Day 5: 验证
-├── 前后端联调
-├── 测试完整聊天流程
-├── UI 优化
-```
-
-**Phase 4: 前端后台设置页面（第 4 周）**
-
-```
-Day 1: 用户管理页面
-├── 用户列表表格
-├── 用户编辑表单
-├── 权限管理
-
-Day 2: 模型配置页面
-├── 模型列表
-├── 模型参数配置
-├── 默认模型设置
-
-Day 3: Agent 配置页面
-├── Agent 类型管理
-├── System Prompt 编辑器
-├── 工具绑定配置
-
-Day 4: 工具配置页面
-├── 工具列表
-├── MCP Server 配置
-├── 权限规则设置
-
-Day 5: 系统设置页面
-├── API Key 管理
-├── 成本监控展示
-├── 日志查看
-```
-
-**Phase 5: 自定义工具 + Hooks（第 5 周）**
-
-```
-Day 1-2: 自定义工具
-├── 实现 SDK MCP Server
-├── 开发业务工具（数据库查询等）
-├── 工具注册
-├── 测试工具调用
-
-Day 3-4: Hooks
-├── 实现审计 Hook
-├── 实现安全 Hook
-├── 实现成本追踪 Hook
-├── Hooks 配置管理
-
-Day 5: 集成
-├── 工具与 Agent 集成
-├── 权限控制测试
-├── 完整流程验证
-```
-
-**Phase 6: 测试 + 部署（第 6 周）**
-
-```
-Day 1-2: 测试完善
-├── 后端单元测试
-├── 前端组件测试
-├── E2E 测试
-├── 边界情况测试
-
-Day 3-4: 部署准备
-├── Docker 配置
-├── nginx 配置
-├── 环境变量配置
-├── 部署脚本
-
-Day 5: 上线
-├── 生产环境部署
-├── 监控配置
-├── 文档完善
-├── 演示验证
-```
-
-### 13.3 验收标准
+### 13.2 验收标准
 
 | 标准 | 要求 |
 |------|------|
@@ -2010,50 +913,12 @@ Day 5: 上线
 
 ---
 
-## 附录 A: 快速开始
-
-### 后端启动
-
-```bash
-# 安装依赖
-cd backend
-pip install -r requirements.txt
-
-# 初始化数据库
-python scripts/init_db.py
-
-# 启动服务
-uvicorn main:app --reload --port 8000
-```
-
-### 前端启动
-
-```bash
-# 安装依赖
-cd frontend
-npm install
-
-# 启动开发服务器
-npm run dev
-```
-
-### Docker 部署
-
-```bash
-# 构建并启动
-docker-compose up -d --build
-
-# 查看日志
-docker-compose logs -f
-```
-
----
-
-## 附录 B: 参考资料
+## 附录：参考资料
 
 1. [Claude Agent SDK Python](https://github.com/anthropics/claude-agent-sdk-python)
 2. [Claude Agent SDK Demos](https://github.com/anthropics/claude-agent-sdk-demos)
-3. [FastAPI 文档](https://fastapi.tiangolo.com/)
-4. [React 文档](https://react.dev/)
-5. [Ant Design 文档](https://ant.design/)
-6. Claude Code 源码调研：`/data/caidanfeng/project/doc/md-doc/agent/claude-code-research/0_code_flow.md`
+3. [Agent SDK Workshop](https://github.com/anthropics/agent-sdk-workshop)
+4. [FastAPI 文档](https://fastapi.tiangolo.com/)
+5. [React 文档](https://react.dev/)
+6. [Ant Design 文档](https://ant.design/)
+7. Claude Code 源码调研：`/data/caidanfeng/project/doc/md-doc/agent/claude-code-research/0_code_flow.md`
