@@ -2,8 +2,8 @@
 
 > 基于 Claude Agent SDK Python 构建多用户 Agent 应用平台
 >
-> 文档版本：v2.1
-> 日期：2026-05-12
+> 文档版本：v3.0
+> 日期：2026-05-13
 
 ---
 
@@ -16,16 +16,8 @@
 5. [Session 管理设计](#5-session-管理设计)
 6. [前端页面设计](#6-前端页面设计)
 7. [后端 API 设计](#7-后端-api设计)
-8. [模型配置设计](#8-模型配置设计)
-9. [工具系统设计](#9-工具系统设计)
-   - 9.1 工具来源
-   - 9.2 工具权限设计
-   - 9.3 权限与 SDK 的关联机制
-   - 9.4 工具权限数据模型
-   - 9.5 工具权限检查流程
-   - 9.6 实际场景示例
-   - 9.7 前端确认框设计
-   - 9.8 工具权限配置 API
+8. [用户配置设计](#8-用户配置设计)
+9. [工具权限设计](#9-工具权限设计)
 10. [项目目录结构](#10-项目目录结构)
 11. [数据库设计](#11-数据库设计)
 12. [实施计划](#12-实施计划)
@@ -39,17 +31,44 @@
 构建一个多用户 Agent 应用平台，包含：
 
 - **用户聊天页面**：多轮对话、历史 Session 查看
-- **后台设置页面**：模型配置、工具权限配置
-- **多用户系统**：用户隔离、Session 管理
+- **用户设置页面**：个人配置模型、工具权限
+- **多用户系统**：用户隔离、独立配置、Session 管理
 - **Agent 能力**：智能对话、工具调用
 
-### 1.2 核心功能模块
+### 1.2 核心设计理念
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       核心设计理念                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  无角色概念                                                               │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  - 不区分普通用户和管理员                                                  │
+│  - 所有用户权限相同                                                       │
+│  - 每个用户独立配置自己的设置                                              │
+│                                                                         │
+│  用户自治                                                                 │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  - 用户自己设置默认模型                                                   │
+│  - 用户自己设置工具权限                                                   │
+│  - 用户自己配置 MCP Server                                                │
+│                                                                         │
+│  数据隔离                                                                 │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  - 用户只能看到自己的 Session                                              │
+│  - 用户配置只影响自己                                                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1.3 核心功能模块
 
 ```mermaid
 graph TB
     subgraph FRONTEND["前端"]
         CHAT["聊天页面<br/>对话 / Session 历史"]
-        SETTINGS["后台设置<br/>模型 / 工具权限"]
+        SETTINGS["用户设置页面<br/>模型 / 工具权限"]
     end
 
     subgraph BACKEND["后端"]
@@ -57,11 +76,10 @@ graph TB
         USER["用户系统"]
         SESSION["Session 管理"]
         AGENT["Agent 引擎"]
-        CONFIG["配置管理"]
     end
 
     subgraph DATABASE["数据层"]
-        DB["MySQL<br/>用户 / Session / 配置"]
+        DB["MySQL<br/>用户 / Session"]
         STORE["Session Store<br/>对话内容"]
     end
 
@@ -69,20 +87,11 @@ graph TB
     API --> USER
     API --> SESSION
     API --> AGENT
-    API --> CONFIG
     USER --> DB
     SESSION --> DB
     SESSION --> STORE
-    CONFIG --> DB
     AGENT --> SDK["Claude Agent SDK"]
 ```
-
-### 1.3 用户角色
-
-| 角色 | 权限 | 功能 |
-|------|------|------|
-| 普通用户 | 聊天、查看自己的 Session | 聊天页面 |
-| 管理员 | 后台设置、用户管理、配置管理 | 聊天页面 + 后台设置页面 |
 
 ### 1.4 技术栈
 
@@ -94,7 +103,7 @@ graph TB
 | **后端** | Python | 3.10+ | 运行环境 |
 | | FastAPI | 0.100+ | API 框架 |
 | | Claude Agent SDK | 0.1.80+ | Agent 核心 |
-| **数据层** | MySQL | 8.0+ | Session/用户/配置 元数据 |
+| **数据层** | MySQL | 8.0+ | 用户/Session 元数据 |
 | | Redis | 7+ | Session 内容缓存 |
 | **部署** | Docker | - | 容器化 |
 
@@ -107,7 +116,7 @@ graph TB
 | 技术 | 选择理由 |
 |------|----------|
 | React | 社区成熟、组件丰富、适合聊天 UI |
-| Ant Design | 企业级 UI、完整组件库、后台页面友好 |
+| Ant Design | 企业级 UI、完整组件库 |
 | WebSocket | 实时通信、流式消息展示 |
 | Zustand | 轻量状态管理 |
 
@@ -117,7 +126,7 @@ graph TB
 |------|----------|
 | FastAPI | 高性能、原生 async、自动 API 文档 |
 | Claude Agent SDK | 官方 SDK、完整 Agent 能力 |
-| MySQL | 关系型数据、用户/配置存储 |
+| MySQL | 关系型数据、用户/Session 存储 |
 | Redis | Session 缓存、实时状态 |
 
 ### 2.3 Claude Agent SDK 内置能力
@@ -130,7 +139,7 @@ graph TB
 | 内置工具 | 30+ 工具（Bash, Read, Write, Edit, WebSearch, WebFetch...） |
 | MCP 协议 | 外部 MCP Server 接入 + SDK MCP Server（in-process） |
 | Hooks 系统 | PreToolUse, PostToolUse, Stop, Notification 等 |
-| 权限模式 | default, acceptEdits, plan, bypassPermissions, auto |
+| 权限模式 | default, acceptEdits, plan, bypassPermissions |
 | 会话管理 | SessionStore API、会话恢复 |
 | 上下文压缩 | Auto Compact 自动压缩 |
 | Prompt Cache | 自动缓存优化 |
@@ -146,13 +155,12 @@ graph TB
 flowchart TB
     subgraph CLIENT["客户端"]
         WEB["Web 浏览器"]
-        MOBILE["移动端（可选）"]
     end
 
     subgraph FRONTEND["前端应用"]
         REACT["React App"]
         CHAT_UI["聊天页面"]
-        SETTINGS_UI["后台设置页面"]
+        SETTINGS_UI["用户设置页面"]
         WS["WebSocket Client"]
     end
 
@@ -163,26 +171,24 @@ flowchart TB
             AUTH_API["认证 API"]
             CHAT_API["聊天 API"]
             SESSION_API["Session API"]
-            CONFIG_API["配置 API"]
-            USER_API["用户 API"]
+            SETTINGS_API["设置 API"]
         end
         
         subgraph CORE_MODULES["核心模块"]
             USER_MGR["用户管理"]
             SESSION_MGR["Session 管理"]
             AGENT_MGR["Agent 管理"]
-            CONFIG_MGR["配置管理"]
         end
     end
 
     subgraph AGENT_ENGINE["Agent 引擎"]
         SDK["Claude Agent SDK"]
         TOOLS["自定义工具"]
-        HOOKS["业务 Hooks"]
+        HOOKS["权限 Hooks"]
     end
 
     subgraph DATA["数据层"]
-        MYSQL["MySQL<br/>用户/配置"]
+        MYSQL["MySQL<br/>用户/Session"]
         REDIS["Redis<br/>Session 缓存"]
         FILE["文件存储<br/>Session 内容"]
     end
@@ -230,7 +236,7 @@ sequenceDiagram
     Frontend->>API: WebSocket 连接
     Frontend->>API: 发送消息 (WS)
     API->>SessionMgr: 创建/恢复 Session
-    API->>Agent: 启动 Agent
+    API->>Agent: 启动 Agent（加载用户配置）
     Agent->>SDK: ClaudeSDKClient.query()
     
     loop 流式响应
@@ -250,10 +256,9 @@ sequenceDiagram
 |------|------|--------|
 | 前端应用 | 用户界面、WebSocket 通信 | 自研 |
 | API 服务 | RESTful API、WebSocket 服务 | 自研 |
-| 用户管理 | 用户 CRUD、认证、权限 | 自研 |
+| 用户管理 | 用户 CRUD、认证 | 自研 |
 | Session 管理 | Session 元数据、内容存储 | 自研 |
-| Agent 管理 | Agent 创建、配置、生命周期 | 自研 |
-| 配置管理 | 模型、Agent、工具配置 | 自研 |
+| Agent 管理 | Agent 创建、加载用户配置 | 自研 |
 | Claude Agent SDK | Agent 核心、工具执行 | Anthropic |
 | Claude Code CLI | QueryEngine、压缩、缓存 | Anthropic |
 
@@ -265,23 +270,66 @@ sequenceDiagram
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | UUID | 用户唯一标识 |
+| id | VARCHAR(36) | 用户唯一标识 |
 | username | VARCHAR(50) | 用户名 |
 | email | VARCHAR(100) | 邮箱 |
 | password_hash | VARCHAR(255) | 密码（bcrypt加密） |
-| role | VARCHAR(20) | 角色：user, admin |
-| settings | JSON | 用户个人设置 |
+| settings | JSON | 用户个人配置 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
 
-**用户个人设置（settings 字段）：**
+### 4.2 用户个人配置（settings 字段）
 
-| 设置项 | 说明 |
+```
+用户 settings 结构：
+
+{
+  "default_model": "claude-sonnet-4-5",
+  
+  "tools": {
+    "Bash": {
+      "enabled": true,
+      "requires_confirmation": true
+    },
+    "Read": {
+      "enabled": true,
+      "requires_confirmation": false
+    },
+    "Write": {
+      "enabled": true,
+      "requires_confirmation": true
+    },
+    "WebSearch": {
+      "enabled": true,
+      "requires_confirmation": false
+    }
+  },
+  
+  "mcp_servers": {
+    "my_server": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "enabled": true
+    }
+  },
+  
+  "agent_options": {
+    "system_prompt": "你是一个有帮助的助手",
+    "permission_mode": "acceptEdits"
+  }
+}
+```
+
+**配置项说明：**
+
+| 配置项 | 说明 |
 |------|------|
-| default_model | 用户默认模型 |
-| max_sessions | 最大 Session 数量 |
+| default_model | 用户默认使用的模型 |
+| tools | 工具权限配置（每个工具的启用状态、是否需要确认） |
+| mcp_servers | 用户自定义的 MCP Server |
+| agent_options | Agent 运行选项 |
 
-### 4.2 认证流程
+### 4.3 认证流程
 
 ```mermaid
 sequenceDiagram
@@ -301,7 +349,7 @@ sequenceDiagram
     alt 密码正确
         API->>JWT: 生成 JWT Token
         JWT-->>API: Token
-        API-->>Frontend: {token, user_info}
+        API-->>Frontend: {token, user_info, settings}
         Frontend->>Frontend: 存储 Token (localStorage)
         Frontend-->>User: 跳转到聊天页面
     else 密码错误
@@ -310,14 +358,14 @@ sequenceDiagram
     end
 ```
 
-### 4.3 认证 API 设计
+### 4.4 认证 API 设计
 
 | API | 方法 | 说明 |
 |------|------|------|
-| `/api/auth/login` | POST | 用户登录，返回 JWT Token |
+| `/api/auth/login` | POST | 用户登录，返回 JWT Token + 用户配置 |
 | `/api/auth/register` | POST | 用户注册 |
 | `/api/auth/logout` | POST | 用户登出 |
-| `/api/auth/me` | GET | 获取当前用户信息 |
+| `/api/auth/me` | GET | 获取当前用户信息 + 配置 |
 | `/api/auth/refresh` | POST | 刷新 Token |
 
 ---
@@ -342,28 +390,22 @@ sequenceDiagram
 │  │  - 书名 → 对话标题   │        │  - 第1章 → 第1条消息        │        │
 │  │  - 作者 → 用户      │        │  - 第2章 → 第2条消息        │        │
 │  │  - 页数 → token数   │        │  - 第3章 → 第3条消息        │        │
-│  │  - 分类 → Agent类型 │        │  ...                        │        │
+│  │                     │        │  ...                        │        │
 │  │                     │        │                             │        │
 │  │  存在：MySQL         │        │  存在：SessionStore         │        │
 │  │                     │        │  (Redis/MySQL/文件)         │        │
-│  │  用途：              │        │                             │        │
-│  │  - 快速找书          │        │  用途：                      │        │
-│  │  - 统计有多少书      │        │  - 阅读内容                 │        │
-│  │  - 不打开就能看      │        │  - 继续阅读（恢复对话）     │        │
-│  │    基本信息          │        │  - Agent 需要内容才能回答  │        │
+│  │                     │        │                             │        │
+│  │  用途：              │        │  用途：                      │        │
+│  │  - 快速找书          │        │  - 阅读内容                 │        │
+│  │  - 统计有多少书      │        │  - 继续阅读（恢复对话）     │        │
+│  │  - 不打开就能看      │        │  - Agent 需要内容才能回答  │        │
+│  │    基本信息          │        │                             │        │
 │  └─────────────────────┘        └─────────────────────────────┘        │
 │                                                                         │
 │  关联方式：书的 ID = 内容的 ID（同一个标识）                               │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
-
-**两种 Session 的具体内容：**
-
-| 类型 | 名称 | 存储位置 | 内容 | 用途 |
-|------|------|----------|------|------|
-| DB Session | 业务 Session | MySQL | session_id, title, model, tokens... | 用户查看历史列表、权限验证、成本统计 |
-| SDK Session | Agent Session | SessionStore | messages, context... | Agent 对话上下文、会话恢复、消息持久化 |
 
 ### 5.2 SessionStore 的位置与实现
 
@@ -408,67 +450,17 @@ sequenceDiagram
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**一句话总结：**
-
-> SessionStore 的"规则"在 SDK 里（接口定义），"具体怎么存"由我们实现。SDK 在需要保存/加载消息时，会自动调用我们写的代码。
-
 ### 5.3 SessionStore 存储位置选择
 
-**可以存到哪里：**
+| 存储位置 | 适合场景 | 性能 | 成本 |
+|----------|----------|------|------|
+| Redis | 活跃对话（正在进行） | 最快 | 高 |
+| MySQL | 持久化存储 | 中 | 低 |
+| 文件 | 大量历史对话 | 慢 | 最低 |
 
-| 存储位置 | 适合场景 | 性能 | 成本 | 复杂度 |
-|----------|----------|------|------|--------|
-| **Redis** | 活跃对话（正在进行） | 最快 | 高（内存） | 低 |
-| **MySQL** | 持久化存储 | 中 | 低 | 中 |
-| **文件系统** | 大量历史对话 | 慢 | 最低 | 中 |
-| **组合方案** | 推荐 | 快+持久 | 中 | 中 |
+**推荐：Redis（活跃） + MySQL/文件（历史）**
 
-**各方案对比：**
-
-| 方案 | 说明 | 优点 | 缺点 |
-|------|------|------|------|
-| 全存 MySQL | Session 内容存到 MySQL 的 JSON 字段 | 简单、可查询、持久化 | 频繁写入可能慢、表会变大 |
-| 全存 Redis | Session 内容存到 Redis | 最快、适合频繁更新 | 内存成本高、需设置过期 |
-| Redis + 文件 | 活跃存 Redis，历史存文件 | 快+持久+低成本 | 需管理两个存储 |
-| Redis + MySQL | 活跃存 Redis，历史存 MySQL | 快+持久+可查询 | 需管理两个存储 |
-
-### 5.4 推荐方案
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      推荐的组合方案                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Session 元数据 → MySQL                                         │
-│  - session_id, title, user_id, tokens, cost                    │
-│  - 查询列表、统计、权限验证                                       │
-│                                                                 │
-│  Session 内容 → Redis + MySQL/文件                              │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  活跃对话 → Redis                                        │   │
-│  │  - 正在进行的对话                                         │   │
-│  │  - 读写最快                                               │   │
-│  │  - 设置过期时间（如 24 小时）                              │   │
-│  │                                                         │   │
-│  │  历史对话 → MySQL/文件                                    │   │
-│  │  - Redis 过期后迁移到这里                                 │   │
-│  │  - 持久保存                                               │   │
-│  │  - 成本更低                                               │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  简化方案：全存 MySQL                                            │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  如果对话量不大，可直接全存 MySQL                          │   │
-│  │  - 新增 sessions_content 表                              │   │
-│  │  - 字段：session_id, messages(JSON), updated_at          │   │
-│  │  - 架构简单，少依赖                                        │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 5.5 Session 关联流程
+### 5.4 Session 关联流程
 
 ```mermaid
 sequenceDiagram
@@ -488,10 +480,12 @@ sequenceDiagram
     API->>DB: SELECT sessions WHERE id="abc-123"
     DB-->>API: Session 元数据
     
+    API->>API: 加载用户 settings 配置
+    
     API->>Store: 创建 SessionStore("abc-123")
     Note over Store: 用 DB session_id 作为 SessionStore 的标识
     
-    API->>SDK: ClaudeSDKClient(session_store=Store)
+    API->>SDK: ClaudeSDKClient(session_store=Store, options=用户配置)
     SDK->>Store: load() 加载历史消息
     Store-->>SDK: messages=[] (新Session为空)
     
@@ -503,7 +497,7 @@ sequenceDiagram
     API->>DB: UPDATE sessions (tokens, cost)
 ```
 
-### 5.6 Session 数据模型
+### 5.5 Session 数据模型
 
 **MySQL Session 表（元数据）：**
 
@@ -513,7 +507,6 @@ sequenceDiagram
 | user_id | VARCHAR(36) | 所属用户 |
 | title | VARCHAR(200) | Session 标题 |
 | model | VARCHAR(50) | 使用的模型 |
-| agent_type | VARCHAR(50) | Agent 类型 |
 | status | VARCHAR(20) | 状态：active, archived, deleted |
 | total_input_tokens | INT | 输入 token 统计 |
 | total_output_tokens | INT | 输出 token 统计 |
@@ -530,7 +523,7 @@ sequenceDiagram
 | context | 对话上下文信息 |
 | metadata | token 统计、成本等 |
 
-### 5.7 实际使用场景
+### 5.6 实际使用场景
 
 **场景1：用户查看历史列表**
 
@@ -579,7 +572,7 @@ SessionStore.save() 保存新消息
 MySQL 更新 token 统计
 ```
 
-### 5.8 Session API 设计
+### 5.7 Session API 设计
 
 | API | 方法 | 说明 |
 |------|------|------|
@@ -609,18 +602,18 @@ MySQL 更新 token 统计
 │   │   └── 流式输出动画
 │   └── InputArea：输入框、发送按钮
 │
-└── 后台设置页面（管理员）
-    ├── 用户管理
-    ├── 工具权限配置
-    ├── 模型配置
-    └── 系统设置
+└── 用户设置页面
+    ├── 模型设置
+    ├── 工具权限设置
+    ├── MCP Server 配置
+    └── Agent 选项设置
 ```
 
 ### 6.2 聊天页面布局
 
 ```
 +--------------------------------------------------+
-|  Header: Logo | 用户名 | 设置按钮 |               |
+|  Header: Logo | 用户名 | [设置]                   |
 +--------------------------------------------------+
 |          |                                       |
 | Sidebar  |         Chat Area                     |
@@ -652,62 +645,46 @@ MySQL 更新 token 统计
 | Thinking | 隐藏或可展开的思考过程 |
 | Error | 红色高亮错误信息 |
 
-### 6.4 后台设置页面
+### 6.4 用户设置页面
 
-**页面结构：**
-
-| 页面 | 功能 |
-|------|------|
-| 用户管理 | 用户列表、添加/编辑用户、更改角色 |
-| 工具权限配置 | 工具列表、编辑权限、设置确认要求 |
-| 模型配置 | 可用模型列表、默认模型 |
-| 系统设置 | API Key、成本监控 |
-
-**工具权限配置页面：**
+**模型设置：**
 
 ```
 +--------------------------------------------------+
-|  工具权限配置                                      |
+|  模型设置                                         |
 +--------------------------------------------------+
 |                                                  |
-|  +--------------------------------------------+  |
-|  | 工具名称 | 允许角色 | 需确认 | 启用 | 操作   |  |
-|  +--------------------------------------------+  |
-|  | Bash    | admin   | ✓     | ✓   | [编辑]  |  |
-|  | Read    | all     | ✗     | ✓   | [编辑]  |  |
-|  | Write   | admin   | ✓     | ✓   | [编辑]  |  |
-|  | Edit    | admin   | ✓     | ✓   | [编辑]  |  |
-|  | WebSearch| all    | ✗     | ✓   | [编辑]  |  |
-|  | WebFetch | all    | ✗     | ✓   | [编辑]  |  |
-|  +--------------------------------------------+  |
+|  默认模型：                                       |
+|  ┌────────────────────────────────────────────┐  |
+|  │ ▸ claude-sonnet-4-5                        │  |
+|  │   claude-opus-4-6                          │  |
+|  │   claude-haiku-4-5                         │  |
+|  └────────────────────────────────────────────┐  |
 |                                                  |
-|  说明：                                           |
-|  - admin = 管理员                                 |
-|  - all = 所有角色（user, admin）                  |
-|  - 需确认 = 执行前需要用户点击确认                 |
-|                                                  |
+|  [保存设置]                                       |
 +--------------------------------------------------+
 ```
 
-**编辑工具权限弹窗：**
+**工具权限设置：**
 
 ```
 +--------------------------------------------------+
-|  编辑工具权限 - Bash                              |
+|  工具权限设置                                     |
 +--------------------------------------------------+
 |                                                  |
-|  工具名称：Bash                                   |
-|  描述：执行 Shell 命令                            |
+|  工具列表：                                       |
+|  +--------------------------------------------+  |
+|  | 工具名称 | 启用 | 需确认 |                  |  |
+|  +--------------------------------------------+  |
+|  | Bash    | [✓] | [✓]    | [编辑详细设置] |  |
+|  | Read    | [✓] | [ ]    | [编辑详细设置] |  |
+|  | Write   | [✓] | [✓]    | [编辑详细设置] |  |
+|  | Edit    | [✓] | [✓]    | [编辑详细设置] |  |
+|  | WebSearch| [✓] | [ ]    | [编辑详细设置] |  |
+|  | WebFetch | [✓] | [ ]    | [编辑详细设置] |  |
+|  +--------------------------------------------+  |
 |                                                  |
-|  允许的角色：                                     |
-|  [ ] 普通用户 (user)                              |
-|  [✓] 管理员 (admin)                               |
-|                                                  |
-|  执行前需要确认：[✓]                              |
-|                                                  |
-|  启用此工具：[✓]                                  |
-|                                                  |
-|  [保存]  [取消]                                   |
+|  [保存设置]                                       |
 +--------------------------------------------------+
 ```
 
@@ -720,10 +697,9 @@ MySQL 更新 token 统计
 | 模块 | 路径前缀 | 功能 |
 |------|----------|------|
 | 认证 | `/api/auth` | 登录、注册、Token 验证 |
-| 用户 | `/api/users` | 用户 CRUD、权限管理 |
 | Session | `/api/sessions` | Session 管理、历史查询 |
 | 聊天 | `/api/chat` | WebSocket、消息发送 |
-| 配置 | `/api/config` | 模型、工具配置 |
+| 设置 | `/api/settings` | 用户个人设置 |
 
 ### 7.2 API 详细列表
 
@@ -734,19 +710,8 @@ MySQL 更新 token 统计
 | `/api/auth/login` | POST | 登录 |
 | `/api/auth/register` | POST | 注册 |
 | `/api/auth/logout` | POST | 登出 |
-| `/api/auth/me` | GET | 获取当前用户 |
+| `/api/auth/me` | GET | 获取当前用户 + 配置 |
 | `/api/auth/refresh` | POST | 刷新 Token |
-
-**用户 API（管理员）：**
-
-| API | 方法 | 说明 |
-|------|------|------|
-| `/api/users` | GET | 用户列表 |
-| `/api/users` | POST | 创建用户 |
-| `/api/users/{id}` | GET | 用户详情 |
-| `/api/users/{id}` | PUT | 更新用户 |
-| `/api/users/{id}` | DELETE | 删除用户 |
-| `/api/users/{id}/role` | PUT | 更改角色 |
 
 **Session API：**
 
@@ -767,110 +732,103 @@ MySQL 更新 token 统计
 | `/api/chat/{session_id}/message` | POST | 发送消息（HTTP 备用） |
 | `/api/chat/{session_id}/stream` | GET | SSE 流（备用） |
 
-**配置 API：**
+**用户设置 API：**
 
 | API | 方法 | 说明 |
 |------|------|------|
-| `/api/config/models` | GET | 获取可用模型列表 |
-| `/api/config/models` | PUT | 更新模型配置 |
-| `/api/config/default-model` | GET/PUT | 默认模型 |
-| `/api/config/tools` | GET | 获取所有工具配置 |
-| `/api/config/tools/{name}` | GET | 获取单个工具配置 |
-| `/api/config/tools/{name}` | PUT | 更新工具权限配置 |
-| `/api/config/tools/{name}/enable` | PATCH | 启用/禁用工具 |
-| `/api/config/mcp-servers` | GET/POST | MCP Server 配置 |
+| `/api/settings` | GET | 获取用户全部设置 |
+| `/api/settings` | PUT | 更新用户全部设置 |
+| `/api/settings/model` | GET/PUT | 默认模型设置 |
+| `/api/settings/tools` | GET/PUT | 工具权限设置 |
+| `/api/settings/tools/{name}` | GET/PUT | 单个工具设置 |
+| `/api/settings/mcp-servers` | GET/POST/DELETE | MCP Server 配置 |
+| `/api/settings/agent-options` | GET/PUT | Agent 选项设置 |
 
 ---
 
-## 8. 模型配置设计
+## 8. 用户配置设计
 
-### 8.1 模型配置数据模型
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | UUID | 配置 ID |
-| name | VARCHAR(50) | 模型名称（claude-opus-4-6） |
-| display_name | VARCHAR(100) | 显示名称（Claude Opus 4） |
-| is_enabled | BOOLEAN | 是否启用 |
-| default_temperature | DECIMAL | 默认温度 |
-| max_output_tokens | INT | 最大输出 tokens |
-| input_cost_per_1k | DECIMAL | 输入成本 |
-| output_cost_per_1k | DECIMAL | 输出成本 |
-| allowed_roles | JSON | 允许的角色列表 |
-
-### 8.2 模型配置功能
-
-| 功能 | 说明 |
-|------|------|
-| 模型列表 | 管理员配置可用模型 |
-| 默认模型 | 系统默认 + 用户个人默认 |
-| 权限控制 | 不同角色可用不同模型 |
-| 成本显示 | 显示各模型成本信息 |
-
-### 8.3 模型选择流程
+### 8.1 配置加载流程
 
 ```mermaid
 flowchart TD
-    START["用户发起对话"] --> CHECK_USER["检查用户个人设置"]
+    LOGIN["用户登录"] --> GET_USER["获取用户信息"]
+    GET_USER --> LOAD_SETTINGS["加载 settings 字段"]
     
-    CHECK_USER --> HAS_DEFAULT{"有个人默认模型?"}
-    HAS_DEFAULT -->|"是"| USER_MODEL["使用用户默认模型"]
-    HAS_DEFAULT -->|"否"| CHECK_SYSTEM["获取系统默认模型"]
+    LOAD_SETTINGS --> PARSE["解析配置"]
+    PARSE --> MERGE["合并系统默认配置"]
     
-    CHECK_SYSTEM --> CHECK_ROLE{"角色允许该模型?"}
-    CHECK_ROLE -->|"是"| FINAL["使用该模型"]
-    CHECK_ROLE -->|"否"| FALLBACK["使用 fallback 模型"]
+    MERGE --> BUILD_OPTIONS["构建 ClaudeAgentOptions"]
+    BUILD_OPTIONS --> CREATE_AGENT["创建 ClaudeSDKClient"]
     
-    USER_MODEL --> CHECK_ROLE2{"角色允许该模型?"}
-    CHECK_ROLE2 -->|"是"| FINAL
-    CHECK_ROLE2 -->|"否"| CHECK_SYSTEM
-    
-    FINAL --> CREATE["创建 Agent"]
+    CREATE_AGENT --> RUN["运行 Agent"]
 ```
 
----
-
-## 9. 工具系统设计
-
-### 9.1 工具来源
-
-| 来源 | 说明 |
-|------|------|
-| SDK 内置 | 30+ 工具（Bash, Read, Write, Edit, WebSearch...） |
-| 自定义工具 | SDK MCP Server（in-process） |
-| 外部 MCP Server | 配置的外部 MCP 服务 |
-
-### 9.2 工具权限设计
-
-**权限设计简化：**
+### 8.2 配置优先级
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                          只需要工具权限                                   │
+│                        配置优先级                                         │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  其他权限（不需要后台配置，用代码固定）：                                   │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  用户角色权限 → 固定                                                      │
-│  - 普通用户：聊天、查看自己的 Session                                      │
-│  - 管理员：后台设置、用户管理                                              │
+│  优先级从高到低：                                                         │
 │                                                                         │
-│  数据权限 → 固定                                                          │
-│  - 用户只能看到自己的 Session                                              │
-│  - 管理员可以看到所有用户                                                  │
+│  1. 用户个人设置（users.settings）                                        │
+│     - 用户自己配置的模型、工具权限等                                       │
 │                                                                         │
-│  ─────────────────────────────────────────────────────────────────────  │
+│  2. 系统默认配置（system_config 表）                                      │
+│     - 用户没有设置时使用的默认值                                           │
 │                                                                         │
-│  工具权限（需要后台配置）：                                                │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  - 哪些工具允许哪些角色使用                                                │
-│  - 是否需要用户确认才能执行                                                │
-│  - 可以随时在后台修改                                                      │
+│  合并逻辑：                                                               │
+│  - 用户设置了 → 用用户设置                                                │
+│  - 用户没设置 → 用系统默认                                                │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 9.3 权限与 SDK 的关联机制
+### 8.3 系统默认配置
+
+**system_config 表（系统级默认值）：**
+
+| 配置项 | 默认值 | 说明 |
+|------|------|------|
+| default_model | claude-sonnet-4-5 | 系统默认模型 |
+| available_models | ["claude-sonnet-4-5", "claude-opus-4-6", "claude-haiku-4-5"] | 可用模型列表 |
+| default_tools_config | {...} | 工具默认配置 |
+
+---
+
+## 9. 工具权限设计
+
+### 9.1 权限配置位置
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    工具权限存储位置                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  用户个人配置（users.settings 字段）：                                     │
+│                                                                         │
+│  {                                                                      │
+│    "tools": {                                                           │
+│      "Bash": {                                                          │
+│        "enabled": true,          ← 是否启用此工具                        │
+│        "requires_confirmation": true  ← 执行前是否需要确认               │
+│      },                                                                 │
+│      "Read": {                                                          │
+│        "enabled": true,                                                 │
+│        "requires_confirmation": false                                   │
+│      },                                                                 │
+│      ...                                                                │
+│    }                                                                    │
+│  }                                                                      │
+│                                                                         │
+│  每个用户独立配置，互不影响                                                │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.2 权限与 SDK 的关联机制
 
 **SDK 提供的权限能力：**
 
@@ -884,64 +842,33 @@ flowchart TD
 │                                                                         │
 │  permission_mode: "default"                                             │
 │  - SDK 内置的交互式权限确认                                              │
-│  - 每次工具执行时，CLI 会询问用户是否允许                                  │
-│  - 用户可以选择：允许一次、永久允许、拒绝                                  │
+│  - 每次工具执行时询问用户是否允许                                         │
 │                                                                         │
 │  permission_mode: "bypassPermissions"                                    │
 │  - 绕过所有权限检查，全部自动执行                                         │
-│  - 我们使用这个模式，然后通过 Hook 实现自己的权限系统                      │
+│  - 我们使用这个模式，通过 Hook 实现自己的权限系统                         │
 │                                                                         │
 │  ─────────────────────────────────────────────────────────────────────  │
 │                                                                         │
-│  SDK 提供的 Hooks 系统（关键入口）：                                       │
+│  SDK 提供的 Hooks 系统：                                                  │
 │  ─────────────────────────────────────────────────────────────────────  │
 │                                                                         │
 │  PreToolUse Hook                                                        │
 │  - 在工具执行前触发                                                      │
 │  - 可以返回 decision: "allow" / "deny"                                  │
-│  - 这是我们接入自定义权限系统的关键入口                                   │
-│                                                                         │
-│  PostToolUse Hook                                                       │
-│  - 在工具执行后触发                                                      │
-│  - 可用于审计日志记录                                                    │
+│  - 这是接入自定义权限系统的关键入口                                       │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**接入方式：通过 PreToolUse Hook**
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    权限系统接入 SDK 的方式                                 │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  流程：                                                                  │
-│                                                                         │
-│  1. 创建 Agent 时，我们传入自定义的 PreToolUse Hook                       │
-│                                                                         │
-│  2. Agent 决定执行某工具时，SDK 会先调用我们的 Hook                       │
-│                                                                         │
-│  3. Hook 函数内部：                                                      │
-│     - 从 MySQL tool_configs 表读取工具权限配置                           │
-│     - 获取当前用户角色                                                   │
-│     - 检查用户角色是否在 allowed_roles 中                                │
-│     - 返回 allow 或 deny 给 SDK                                          │
-│                                                                         │
-│  4. SDK 根据 Hook 返回的决策：                                           │
-│     - allow → 执行工具                                                   │
-│     - deny → 阻止执行，Agent 收到错误消息                                │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-**关联流程图：**
+**接入流程：**
 
 ```mermaid
 sequenceDiagram
     participant Agent as Agent
     participant SDK as Claude SDK
     participant Hook as PreToolUse Hook
-    participant DB as MySQL
+    participant DB as MySQL (users.settings)
     participant User as 用户
 
     Agent->>SDK: 决定执行 Bash 工具
@@ -950,147 +877,99 @@ sequenceDiagram
     
     SDK->>Hook: 调用 Hook，传入 tool_name="Bash"
     
-    Hook->>DB: SELECT FROM tool_configs WHERE name="Bash"
-    DB-->>Hook: allowed_roles=["admin"]
+    Hook->>DB: 获取当前用户的 settings.tools.Bash
+    DB-->>Hook: {enabled: true, requires_confirmation: true}
     
-    Hook->>Hook: 获取当前用户角色="user"
-    Hook->>Hook: 检查："user" 在 ["admin"] 中？
+    Note over Hook: Hook 检查用户配置
     
-    alt 角色不允许
-        Hook-->>SDK: 返回 decision="deny"
-        SDK-->>Agent: 阻止执行，返回错误
-        Agent-->>User: "抱歉，没有权限执行此操作"
-    else 角色允许
-        Hook-->>SDK: 返回 decision="allow"
-        Note over SDK: 如果 requires_confirmation=true<br/>SDK 弹出确认框
-        SDK->>Agent: 执行工具
-    end
+    Hook->>Hook: enabled = true? → 是
+    Hook->>Hook: 返回 decision = "allow"
+    
+    Hook-->>SDK: 返回 {decision: "allow"}
+    
+    Note over SDK: requires_confirmation = true<br/>SDK 弹出确认框
+    
+    SDK->>User: 弹出确认框："执行 Bash: ls -la?"
+    User->>SDK: 点击"允许"
+    
+    SDK->>Agent: 执行工具
+    
+    Agent-->>User: 显示执行结果
 ```
 
-**两种权限检查场景：**
-
-| 场景 | 条件 | 结果 |
-|------|------|------|
-| 角色不允许 | 用户角色不在 allowed_roles 中 | Hook 返回 deny，工具不执行 |
-| 角色允许 + 不需确认 | 角色在 allowed_roles 中 + requires_confirmation=false | Hook 返回 allow，直接执行 |
-| 角色允许 + 需确认 | 角色在 allowed_roles 中 + requires_confirmation=true | Hook 返回 allow，SDK 弹出确认框 |
-
-**关键点总结：**
-
-| 问题 | 答案 |
-|------|------|
-| SDK 有权限系统吗？ | 有，但比较简单（交互式确认或绕过） |
-| 我们的权限在哪？ | MySQL tool_configs 表 |
-| 如何关联？ | 通过 SDK 的 PreToolUse Hook |
-| Hook 做什么？ | 读 DB 配置 → 检查角色 → 返回决策 |
-| SDK 做什么？ | 根据决策，允许或阻止工具 |
-
-### 9.4 工具权限数据模型
-
-**tool_configs 表：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | VARCHAR(36) | 配置 ID |
-| name | VARCHAR(50) | 工具名称 |
-| description | TEXT | 描述 |
-| is_builtin | BOOLEAN | 是否内置工具 |
-| is_enabled | BOOLEAN | 是否启用 |
-| allowed_roles | JSON | 允许的角色，如 `["user", "admin"]` |
-| requires_confirmation | BOOLEAN | 执行前是否需要用户确认 |
-
-**示例数据：**
-
-| name | allowed_roles | requires_confirmation | is_enabled |
-|------|---------------|----------------------|------------|
-| Bash | ["admin"] | true | true |
-| Read | ["user", "admin"] | false | true |
-| Write | ["admin"] | true | true |
-| Edit | ["admin"] | true | true |
-| WebSearch | ["user", "admin"] | false | true |
-| WebFetch | ["user", "admin"] | false | true |
-
-### 9.5 工具权限检查流程
+### 9.3 工具权限检查流程
 
 ```mermaid
 flowchart TD
-    AGENT["Agent 决定执行工具"] --> CHECK["检查工具权限配置"]
+    AGENT["Agent 决定执行工具"] --> CHECK["检查用户工具配置"]
     
-    CHECK --> ENABLED{"工具启用?"}
-    ENABLED -->|"否"| DENY1["拒绝：工具已禁用"]
-    ENABLED -->|"是"| ROLE{"用户角色在<br/>allowed_roles 中?"}
-    
-    ROLE -->|"否"| DENY2["拒绝：无权限<br/>告诉用户此工具需要更高权限"]
-    ROLE -->|"是"| CONFIRM{"需要确认?"}
+    CHECK --> ENABLED{"用户启用此工具?"}
+    ENABLED -->|"否"| DENY1["拒绝：工具已禁用<br/>告诉用户可在设置中启用"]
+    ENABLED -->|"是"| CONFIRM{"需要确认?"}
     
     CONFIRM -->|"否"| EXECUTE["直接执行工具"]
     CONFIRM -->|"是"| ASK["前端弹出确认框"]
     
     ASK --> USER{"用户选择"}
     USER -->|"允许"| EXECUTE
-    USER -->|"拒绝"| DENY3["拒绝：用户取消"]
+    USER -->|"拒绝"| DENY2["拒绝：用户取消"]
 ```
 
-### 9.6 实际场景示例
+### 9.4 实际场景示例
 
-**场景1：普通用户使用 Read 工具**
+**场景1：用户启用 Read 且不需要确认**
 
 ```
-用户角色：user
-工具：Read
-配置：allowed_roles = [user, admin]
-      requires_confirmation = false
+用户配置：tools.Read = {enabled: true, requires_confirmation: false}
 
 流程：
 Agent 决定执行 Read
     ↓
-检查工具配置
+Hook 检查用户配置
     ↓
-user 在 allowed_roles 中？ → 是
+enabled = true? → 是
     ↓
-需要确认？ → 否
+requires_confirmation = false? → 是
+    ↓
+Hook 返回 allow
     ↓
 直接执行
 
-结果：成功执行
+结果：成功执行，无需确认
 ```
 
-**场景2：普通用户使用 Bash 工具**
+**场景2：用户禁用 Bash**
 
 ```
-用户角色：user
-工具：Bash
-配置：allowed_roles = [admin]
-      requires_confirmation = true
+用户配置：tools.Bash = {enabled: false, requires_confirmation: true}
 
 流程：
 Agent 决定执行 Bash
     ↓
-检查工具配置
+Hook 检查用户配置
     ↓
-user 在 allowed_roles 中？ → 否
+enabled = false? → 是
+    ↓
+Hook 返回 deny
 
-结果：拒绝执行，提示 "您没有权限使用此工具，此工具需要管理员权限"
+结果：拒绝执行，Agent 告知用户 "此工具已禁用，可在设置中启用"
 ```
 
-**场景3：管理员使用 Bash 工具**
+**场景3：用户启用 Bash 且需要确认**
 
 ```
-用户角色：admin
-工具：Bash
-配置：allowed_roles = [admin]
-      requires_confirmation = true
+用户配置：tools.Bash = {enabled: true, requires_confirmation: true}
 
 流程：
 Agent 决定执行 Bash
     ↓
-检查工具配置
+Hook 检查用户配置
     ↓
-admin 在 allowed_roles 中？ → 是
+enabled = true? → 是
     ↓
-需要确认？ → 是
+Hook 返回 allow
     ↓
-前端弹出确认框："Agent 想要执行命令: ls -la，是否允许？"
+SDK 弹出确认框："执行命令: ls -la?"
     ↓
 用户点击"允许"
     ↓
@@ -1099,9 +978,7 @@ admin 在 allowed_roles 中？ → 是
 结果：成功执行
 ```
 
-### 9.7 前端确认框设计
-
-当工具需要确认时，前端弹出确认框：
+### 9.5 前端确认框设计
 
 ```
 +--------------------------------------------------+
@@ -1131,15 +1008,6 @@ admin 在 allowed_roles 中？ → 是
 | Edit | 显示 old_string 和 new_string 的摘要 |
 | WebFetch | 显示 URL |
 
-### 9.8 工具权限配置 API
-
-| API | 方法 | 说明 |
-|------|------|------|
-| `/api/config/tools` | GET | 获取所有工具配置列表 |
-| `/api/config/tools/{name}` | GET | 获取单个工具配置 |
-| `/api/config/tools/{name}` | PUT | 更新工具权限配置 |
-| `/api/config/tools/{name}/enable` | PATCH | 启用/禁用工具 |
-
 ---
 
 ## 10. 项目目录结构
@@ -1149,6 +1017,9 @@ agent_platform/
 ├── frontend/                    # 前端应用
 │   ├── src/
 │   │   ├── pages/               # 页面组件
+│   │   │   ├── Login.tsx
+│   │   │   ├── Chat.tsx
+│   │   │   └── Settings.tsx
 │   │   ├── components/          # 公共组件
 │   │   ├── hooks/               # React Hooks
 │   │   ├── stores/              # 状态管理
@@ -1165,7 +1036,7 @@ agent_platform/
 │   ├── services/                # 业务服务
 │   ├── core/                    # 核心模块
 │   ├── tools/                   # 自定义工具
-│   ├── hooks/                   # 业务 Hooks
+│   ├── hooks/                   # 权限 Hooks
 │   ├── migrations/              # 数据库迁移
 │   ├── main.py                  # 入口
 │   └── requirements.txt
@@ -1196,12 +1067,9 @@ agent_platform/
 
 | 表名 | 说明 |
 |------|------|
-| users | 用户表 |
+| users | 用户表（含 settings） |
 | sessions | Session 元数据表 |
-| model_configs | 模型配置表 |
-| tool_configs | 工具配置表 |
-| mcp_servers | MCP Server 配置表 |
-| system_config | 系统配置表 |
+| system_config | 系统默认配置表 |
 
 ### 11.2 Session 存储架构
 
@@ -1214,8 +1082,8 @@ agent_platform/
 │  ─────────────────────────────────────────────────────────────  │
 │                                                                 │
 │  Session 元数据      MySQL              用户历史列表              │
-│  - id, title       sessions表         权限验证                  │
-│  - model, type                        成本统计                  │
+│  - id, title       sessions表         快速查询                  │
+│  - model                              成本统计                  │
 │  - token统计                                                   │
 │                                                                 │
 │  Session 消息内容    Redis + 文件       Agent 对话上下文          │
@@ -1238,8 +1106,7 @@ agent_platform/
 | username | VARCHAR(50) | 用户名 |
 | email | VARCHAR(100) | 邮箱 |
 | password_hash | VARCHAR(255) | 密码哈希 |
-| role | VARCHAR(20) | 角色：user, admin |
-| settings | JSON | 个人设置 |
+| settings | JSON | 用户个人配置 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
 
@@ -1258,67 +1125,37 @@ agent_platform/
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
 
-**模型配置表 (model_configs)：**
+**系统配置表 (system_config)：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | VARCHAR(36) | UUID |
-| name | VARCHAR(50) | 模型名 |
-| display_name | VARCHAR(100) | 显示名 |
-| is_enabled | BOOLEAN | 是否启用 |
-| default_temperature | DECIMAL(3,2) | 温度 |
-| max_output_tokens | INT | 最大 tokens |
-| input_cost_per_1k | DECIMAL(10,4) | 输入成本 |
-| output_cost_per_1k | DECIMAL(10,4) | 输出成本 |
-
-**工具配置表 (tool_configs)：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | VARCHAR(36) | UUID |
-| name | VARCHAR(50) | 工具名 |
-| description | TEXT | 描述 |
-| is_builtin | BOOLEAN | 是否内置 |
-| is_enabled | BOOLEAN | 是否启用 |
-| allowed_roles | JSON | 允许角色 |
-| requires_confirmation | BOOLEAN | 需确认 |
-| mcp_server | VARCHAR(50) | MCP 来源 |
-
-**MCP Server 配置表 (mcp_servers)：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | VARCHAR(36) | UUID |
-| name | VARCHAR(50) | Server 名 |
-| command | TEXT | 启动命令 |
-| args | JSON | 参数 |
-| env | JSON | 环境变量 |
-| is_enabled | BOOLEAN | 是否启用 |
+| key | VARCHAR(50) | 配置项名称 |
+| value | JSON | 配置值 |
+| updated_at | TIMESTAMP | 更新时间 |
 
 ---
 
 ## 12. 实施计划
 
-### 12.1 开发阶段（总计 6 周）
+### 12.1 开发阶段（总计 5 周）
 
 | 阶段 | 时间 | 任务 | 产出 |
 |------|------|------|------|
 | Phase 1 | 第 1 周 | 后端基础 + 用户系统 | 用户认证 API、数据库 |
 | Phase 2 | 第 2 周 | Session 管理 + Agent 核心 | Session API、Agent 引擎 |
 | Phase 3 | 第 3 周 | 前端聊天页面 | 聊天 UI、WebSocket |
-| Phase 4 | 第 4 周 | 前端后台设置页面 | 工具权限配置 UI |
-| Phase 5 | 第 5 周 | 自定义工具 + Hooks | 业务工具集成 |
-| Phase 6 | 第 6 周 | 测试 + 部署 | 完整系统上线 |
+| Phase 4 | 第 4 周 | 前端用户设置页面 | 模型/工具配置 UI |
+| Phase 5 | 第 5 周 | 测试 + 部署 | 完整系统上线 |
 
 ### 12.2 验收标准
 
 | 标准 | 要求 |
 |------|------|
-| 多用户支持 | 用户注册/登录、角色权限、配置隔离 |
+| 多用户支持 | 用户注册/登录、数据隔离 |
 | 聊天功能 | 多轮对话、流式输出、Session 历史 |
-| 后台配置 | 工具权限配置、模型配置、用户管理 |
-| 数据持久化 | Session 存储、配置存储、用户数据 |
-| 安全认证 | JWT 认证、权限控制、数据隔离 |
+| 用户配置 | 用户可设置模型、工具权限 |
+| 数据持久化 | Session 存储、配置存储 |
+| 安全认证 | JWT 认证、数据隔离 |
 | 性能 | WebSocket 流式响应 < 100ms |
 
 ---
@@ -1331,4 +1168,3 @@ agent_platform/
 4. [FastAPI 文档](https://fastapi.tiangolo.com/)
 5. [React 文档](https://react.dev/)
 6. [Ant Design 文档](https://ant.design/)
-7. Claude Code 源码调研：`/data/caidanfeng/project/doc/md-doc/agent/claude-code-research/0_code_flow.md`
