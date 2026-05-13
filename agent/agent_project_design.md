@@ -20,11 +20,12 @@
 9. [工具系统设计](#9-工具系统设计)
    - 9.1 工具来源
    - 9.2 工具权限设计
-   - 9.3 工具权限数据模型
-   - 9.4 工具权限检查流程
-   - 9.5 实际场景示例
-   - 9.6 前端确认框设计
-   - 9.7 工具权限配置 API
+   - 9.3 权限与 SDK 的关联机制
+   - 9.4 工具权限数据模型
+   - 9.5 工具权限检查流程
+   - 9.6 实际场景示例
+   - 9.7 前端确认框设计
+   - 9.8 工具权限配置 API
 10. [项目目录结构](#10-项目目录结构)
 11. [数据库设计](#11-数据库设计)
 12. [实施计划](#12-实施计划)
@@ -869,7 +870,122 @@ flowchart TD
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 9.3 工具权限数据模型
+### 9.3 权限与 SDK 的关联机制
+
+**SDK 提供的权限能力：**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Claude Agent SDK 的权限机制                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  SDK 提供的权限模式（permission_mode）：                                  │
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  permission_mode: "default"                                             │
+│  - SDK 内置的交互式权限确认                                              │
+│  - 每次工具执行时，CLI 会询问用户是否允许                                  │
+│  - 用户可以选择：允许一次、永久允许、拒绝                                  │
+│                                                                         │
+│  permission_mode: "bypassPermissions"                                    │
+│  - 绕过所有权限检查，全部自动执行                                         │
+│  - 我们使用这个模式，然后通过 Hook 实现自己的权限系统                      │
+│                                                                         │
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  SDK 提供的 Hooks 系统（关键入口）：                                       │
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  PreToolUse Hook                                                        │
+│  - 在工具执行前触发                                                      │
+│  - 可以返回 decision: "allow" / "deny"                                  │
+│  - 这是我们接入自定义权限系统的关键入口                                   │
+│                                                                         │
+│  PostToolUse Hook                                                       │
+│  - 在工具执行后触发                                                      │
+│  - 可用于审计日志记录                                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**接入方式：通过 PreToolUse Hook**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    权限系统接入 SDK 的方式                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  流程：                                                                  │
+│                                                                         │
+│  1. 创建 Agent 时，我们传入自定义的 PreToolUse Hook                       │
+│                                                                         │
+│  2. Agent 决定执行某工具时，SDK 会先调用我们的 Hook                       │
+│                                                                         │
+│  3. Hook 函数内部：                                                      │
+│     - 从 MySQL tool_configs 表读取工具权限配置                           │
+│     - 获取当前用户角色                                                   │
+│     - 检查用户角色是否在 allowed_roles 中                                │
+│     - 返回 allow 或 deny 给 SDK                                          │
+│                                                                         │
+│  4. SDK 根据 Hook 返回的决策：                                           │
+│     - allow → 执行工具                                                   │
+│     - deny → 阻止执行，Agent 收到错误消息                                │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**关联流程图：**
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agent
+    participant SDK as Claude SDK
+    participant Hook as PreToolUse Hook
+    participant DB as MySQL
+    participant User as 用户
+
+    Agent->>SDK: 决定执行 Bash 工具
+    
+    Note over SDK: SDK 触发 PreToolUse Hook
+    
+    SDK->>Hook: 调用 Hook，传入 tool_name="Bash"
+    
+    Hook->>DB: SELECT FROM tool_configs WHERE name="Bash"
+    DB-->>Hook: allowed_roles=["admin"]
+    
+    Hook->>Hook: 获取当前用户角色="user"
+    Hook->>Hook: 检查："user" 在 ["admin"] 中？
+    
+    alt 角色不允许
+        Hook-->>SDK: 返回 decision="deny"
+        SDK-->>Agent: 阻止执行，返回错误
+        Agent-->>User: "抱歉，没有权限执行此操作"
+    else 角色允许
+        Hook-->>SDK: 返回 decision="allow"
+        Note over SDK: 如果 requires_confirmation=true<br/>SDK 弹出确认框
+        SDK->>Agent: 执行工具
+    end
+```
+
+**两种权限检查场景：**
+
+| 场景 | 条件 | 结果 |
+|------|------|------|
+| 角色不允许 | 用户角色不在 allowed_roles 中 | Hook 返回 deny，工具不执行 |
+| 角色允许 + 不需确认 | 角色在 allowed_roles 中 + requires_confirmation=false | Hook 返回 allow，直接执行 |
+| 角色允许 + 需确认 | 角色在 allowed_roles 中 + requires_confirmation=true | Hook 返回 allow，SDK 弹出确认框 |
+
+**关键点总结：**
+
+| 问题 | 答案 |
+|------|------|
+| SDK 有权限系统吗？ | 有，但比较简单（交互式确认或绕过） |
+| 我们的权限在哪？ | MySQL tool_configs 表 |
+| 如何关联？ | 通过 SDK 的 PreToolUse Hook |
+| Hook 做什么？ | 读 DB 配置 → 检查角色 → 返回决策 |
+| SDK 做什么？ | 根据决策，允许或阻止工具 |
+
+### 9.4 工具权限数据模型
 
 **tool_configs 表：**
 
@@ -894,7 +1010,7 @@ flowchart TD
 | WebSearch | ["user", "admin"] | false | true |
 | WebFetch | ["user", "admin"] | false | true |
 
-### 9.4 工具权限检查流程
+### 9.5 工具权限检查流程
 
 ```mermaid
 flowchart TD
@@ -915,7 +1031,7 @@ flowchart TD
     USER -->|"拒绝"| DENY3["拒绝：用户取消"]
 ```
 
-### 9.5 实际场景示例
+### 9.6 实际场景示例
 
 **场景1：普通用户使用 Read 工具**
 
@@ -983,7 +1099,7 @@ admin 在 allowed_roles 中？ → 是
 结果：成功执行
 ```
 
-### 9.6 前端确认框设计
+### 9.7 前端确认框设计
 
 当工具需要确认时，前端弹出确认框：
 
@@ -1015,7 +1131,7 @@ admin 在 allowed_roles 中？ → 是
 | Edit | 显示 old_string 和 new_string 的摘要 |
 | WebFetch | 显示 URL |
 
-### 9.7 工具权限配置 API
+### 9.8 工具权限配置 API
 
 | API | 方法 | 说明 |
 |------|------|------|
