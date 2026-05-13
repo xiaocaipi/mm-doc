@@ -19,13 +19,6 @@
 8. [模型配置设计](#8-模型配置设计)
 9. [Agent 模块设计](#9-agent-模块设计)
 10. [工具系统设计](#10-工具系统设计)
-   - 10.1 工具来源
-   - 10.2 工具权限设计
-   - 10.3 工具权限数据模型
-   - 10.4 工具权限检查流程
-   - 10.5 实际场景示例
-   - 10.6 前端确认框设计
-   - 10.7 工具权限配置 API
 11. [项目目录结构](#11-项目目录结构)
 12. [数据库设计](#12-数据库设计)
 13. [实施计划](#13-实施计划)
@@ -663,60 +656,11 @@ MySQL 更新 token 统计
 
 | 页面 | 功能 |
 |------|------|
-| 用户管理 | 用户列表、添加/编辑用户、更改角色 |
-| 工具权限配置 | 工具列表、编辑权限、设置确认要求 |
-| 模型配置 | 可用模型列表、默认模型 |
-| Agent 配置 | Agent 类型管理、System Prompt |
-| 系统设置 | API Key、成本监控 |
-
-**工具权限配置页面：**
-
-```
-+--------------------------------------------------+
-|  工具权限配置                                      |
-+--------------------------------------------------+
-|                                                  |
-|  +--------------------------------------------+  |
-|  | 工具名称 | 允许角色  | 需确认 | 启用 | 操作 |  |
-|  +--------------------------------------------+  |
-|  | Bash    | admin+  | ✓     | ✓   | [编辑] |  |
-|  | Read    | all     | ✗     | ✓   | [编辑] |  |
-|  | Write   | admin+  | ✓     | ✓   | [编辑] |  |
-|  | Edit    | admin+  | ✓     | ✓   | [编辑] |  |
-|  | WebSearch| all    | ✗     | ✓   | [编辑] |  |
-|  | WebFetch | all    | ✗     | ✓   | [编辑] |  |
-|  +--------------------------------------------+  |
-|                                                  |
-|  说明：                                           |
-|  - admin+ = admin 和 super_admin                 |
-|  - all = 所有角色（user, admin, super_admin）    |
-|  - 需确认 = 执行前需要用户点击确认                 |
-|                                                  |
-+--------------------------------------------------+
-```
-
-**编辑工具权限弹窗：**
-
-```
-+--------------------------------------------------+
-|  编辑工具权限 - Bash                              |
-+--------------------------------------------------+
-|                                                  |
-|  工具名称：Bash                                   |
-|  描述：执行 Shell 命令                            |
-|                                                  |
-|  允许的角色：                                     |
-|  [ ] 普通用户 (user)                              |
-|  [✓] 管理员 (admin)                               |
-|  [✓] 超级管理员 (super_admin)                     |
-|                                                  |
-|  执行前需要确认：[✓]                              |
-|                                                  |
-|  启用此工具：[✓]                                  |
-|                                                  |
-|  [保存]  [取消]                                   |
-+--------------------------------------------------+
-```
+| 用户管理 | 用户列表、添加/编辑用户、权限分配 |
+| 模型配置 | 可用模型列表、默认模型、模型参数 |
+| Agent 配置 | Agent 类型管理、System Prompt、工具绑定 |
+| 工具配置 | 工具列表、MCP Server、权限规则 |
+| 系统设置 | API Key、成本监控、日志查看 |
 
 ---
 
@@ -783,10 +727,8 @@ MySQL 更新 token 统计
 | `/api/config/default-model` | GET/PUT | 默认模型 |
 | `/api/config/agents` | GET/POST | Agent 类型管理 |
 | `/api/config/agents/{id}` | PUT/DELETE | 更新/删除 Agent |
-| `/api/config/tools` | GET | 获取所有工具配置 |
-| `/api/config/tools/{name}` | GET | 获取单个工具配置 |
-| `/api/config/tools/{name}` | PUT | 更新工具权限配置 |
-| `/api/config/tools/{name}/enable` | PATCH | 启用/禁用工具 |
+| `/api/config/tools` | GET | 工具列表 |
+| `/api/config/tools/permissions` | PUT | 工具权限 |
 | `/api/config/mcp-servers` | GET/POST | MCP Server 配置 |
 
 ---
@@ -891,192 +833,44 @@ flowchart TD
 | 自定义工具 | SDK MCP Server（in-process） |
 | 外部 MCP Server | 配置的外部 MCP 服务 |
 
-### 10.2 工具权限设计
-
-**权限设计简化：**
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          只需要工具权限                                   │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  其他权限（不需要后台配置，用代码固定）：                                   │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  用户角色权限 → 固定                                                      │
-│  - 普通用户：聊天、查看自己的 Session                                      │
-│  - 管理员：后台设置、用户管理                                              │
-│  - 超级管理员：全部                                                       │
-│                                                                         │
-│  数据权限 → 固定                                                          │
-│  - 用户只能看到自己的 Session                                              │
-│  - 管理员可以看到所有用户                                                  │
-│                                                                         │
-│  ─────────────────────────────────────────────────────────────────────  │
-│                                                                         │
-│  工具权限（需要后台配置）：                                                │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  - 哪些工具允许哪些角色使用                                                │
-│  - 是否需要用户确认才能执行                                                │
-│  - 可以随时在后台修改                                                      │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-### 10.3 工具权限数据模型
-
-**tool_configs 表：**
+### 10.2 工具配置数据模型
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | VARCHAR(36) | 配置 ID |
+| id | UUID | 配置 ID |
 | name | VARCHAR(50) | 工具名称 |
 | description | TEXT | 描述 |
 | is_builtin | BOOLEAN | 是否内置工具 |
 | is_enabled | BOOLEAN | 是否启用 |
-| allowed_roles | JSON | 允许的角色，如 `["user", "admin", "super_admin"]` |
-| requires_confirmation | BOOLEAN | 执行前是否需要用户确认 |
+| allowed_roles | JSON | 允许的角色 |
+| requires_confirmation | BOOLEAN | 是否需要确认 |
+| mcp_server | VARCHAR(50) | 来源 MCP Server |
 
-**示例数据：**
-
-| name | allowed_roles | requires_confirmation | is_enabled |
-|------|---------------|----------------------|------------|
-| Bash | ["admin", "super_admin"] | true | true |
-| Read | ["user", "admin", "super_admin"] | false | true |
-| Write | ["admin", "super_admin"] | true | true |
-| Edit | ["admin", "super_admin"] | true | true |
-| WebSearch | ["user", "admin", "super_admin"] | false | true |
-| WebFetch | ["user", "admin", "super_admin"] | false | true |
-| Agent | ["super_admin"] | true | true |
-
-### 10.4 工具权限检查流程
+### 10.3 工具权限控制流程
 
 ```mermaid
 flowchart TD
-    AGENT["Agent 决定执行工具"] --> CHECK["检查工具权限配置"]
+    TOOL_CALL["工具调用请求"] --> CHECK_AGENT["检查 Agent 允许的工具"]
     
-    CHECK --> ENABLED{"工具启用?"}
-    ENABLED -->|"否"| DENY1["拒绝：工具已禁用"]
-    ENABLED -->|"是"| ROLE{"用户角色在<br/>allowed_roles 中?"}
+    CHECK_AGENT --> AGENT_ALLOW{"Agent 允许?"}
+    AGENT_ALLOW -->|"否"| DENY["拒绝"]
+    AGENT_ALLOW -->|"是"| CHECK_ROLE["检查用户角色权限"]
     
-    ROLE -->|"否"| DENY2["拒绝：无权限<br/>告诉用户此工具需要更高权限"]
-    ROLE -->|"是"| CONFIRM{"需要确认?"}
+    CHECK_ROLE --> ROLE_ALLOW{"角色允许?"}
+    ROLE_ALLOW -->|"否"| DENY
+    ROLE_ALLOW -->|"是"| CHECK_USER["检查用户个人设置"]
     
-    CONFIRM -->|"否"| EXECUTE["直接执行工具"]
-    CONFIRM -->|"是"| ASK["前端弹出确认框"]
+    CHECK_USER --> USER_ALLOW{"用户允许?"}
+    USER_ALLOW -->|"否"| DENY
+    USER_ALLOW -->|"是"| CHECK_CONFIRM{"需要确认?"}
     
-    ASK --> USER{"用户选择"}
-    USER -->|"允许"| EXECUTE
-    USER -->|"拒绝"| DENY3["拒绝：用户取消"]
+    CHECK_CONFIRM -->|"是"| ASK["前端弹出确认"]
+    CHECK_CONFIRM -->|"否"| EXECUTE["执行工具"]
+    
+    ASK --> USER_DECIDE{"用户决定"}
+    USER_DECIDE -->|"允许"| EXECUTE
+    USER_DECIDE -->|"拒绝"| DENY
 ```
-
-### 10.5 实际场景示例
-
-**场景1：普通用户使用 Read 工具**
-
-```
-用户角色：user
-工具：Read
-配置：allowed_roles = [user, admin, super_admin]
-      requires_confirmation = false
-
-流程：
-Agent 决定执行 Read
-    ↓
-检查工具配置
-    ↓
-user 在 allowed_roles 中？ → 是
-    ↓
-需要确认？ → 否
-    ↓
-直接执行
-
-结果：成功执行
-```
-
-**场景2：普通用户使用 Bash 工具**
-
-```
-用户角色：user
-工具：Bash
-配置：allowed_roles = [admin, super_admin]
-      requires_confirmation = true
-
-流程：
-Agent 决定执行 Bash
-    ↓
-检查工具配置
-    ↓
-user 在 allowed_roles 中？ → 否
-
-结果：拒绝执行，提示 "您没有权限使用此工具，此工具需要管理员权限"
-```
-
-**场景3：管理员使用 Bash 工具**
-
-```
-用户角色：admin
-工具：Bash
-配置：allowed_roles = [admin, super_admin]
-      requires_confirmation = true
-
-流程：
-Agent 决定执行 Bash
-    ↓
-检查工具配置
-    ↓
-admin 在 allowed_roles 中？ → 是
-    ↓
-需要确认？ → 是
-    ↓
-前端弹出确认框："Agent 想要执行命令: ls -la，是否允许？"
-    ↓
-用户点击"允许"
-    ↓
-执行工具
-
-结果：成功执行
-```
-
-### 10.6 前端确认框设计
-
-当工具需要确认时，前端弹出确认框：
-
-```
-+--------------------------------------------------+
-|  ⚠️ 工具执行确认                                   |
-+--------------------------------------------------+
-|                                                  |
-|  Agent 想要执行以下工具：                          |
-|                                                  |
-|  工具：Bash                                       |
-|  内容：rm -rf /tmp/test                          |
-|                                                  |
-|  +--------------------------------------------+  |
-|  |  [✓] 记住此选择，本次对话不再询问            |  |
-|  +--------------------------------------------+  |
-|                                                  |
-|  [允许执行]  [拒绝]                               |
-+--------------------------------------------------+
-```
-
-**确认框显示内容：**
-
-| 工具 | 显示内容 |
-|------|----------|
-| Bash | 显示要执行的命令 |
-| Read | 显示要读取的文件路径 |
-| Write | 显示要写入的文件路径 |
-| Edit | 显示 old_string 和 new_string 的摘要 |
-| WebFetch | 显示 URL |
-
-### 10.7 工具权限配置 API
-
-| API | 方法 | 说明 |
-|------|------|------|
-| `/api/config/tools` | GET | 获取所有工具配置列表 |
-| `/api/config/tools/{name}` | GET | 获取单个工具配置 |
-| `/api/config/tools/{name}` | PUT | 更新工具权限配置 |
-| `/api/config/tools/{name}/enable` | PATCH | 启用/禁用工具 |
 
 ---
 
