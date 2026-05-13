@@ -274,62 +274,49 @@ sequenceDiagram
 | username | VARCHAR(50) | 用户名 |
 | email | VARCHAR(100) | 邮箱 |
 | password_hash | VARCHAR(255) | 密码（bcrypt加密） |
-| settings | JSON | 用户个人配置 |
+| default_model | VARCHAR(50) | 默认模型 |
+| mcp_servers | JSON | MCP Server 配置 |
+| agent_options | JSON | Agent 运行选项 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
 
-### 4.2 用户个人配置（settings 字段）
+### 4.2 用户配置分布
 
 ```
-用户 settings 结构：
-
-{
-  "default_model": "claude-sonnet-4-5",
-  
-  "tools": {
-    "Bash": {
-      "enabled": true,
-      "requires_confirmation": true
-    },
-    "Read": {
-      "enabled": true,
-      "requires_confirmation": false
-    },
-    "Write": {
-      "enabled": true,
-      "requires_confirmation": true
-    },
-    "WebSearch": {
-      "enabled": true,
-      "requires_confirmation": false
-    }
-  },
-  
-  "mcp_servers": {
-    "my_server": {
-      "command": "python",
-      "args": ["mcp_server.py"],
-      "enabled": true
-    }
-  },
-  
-  "agent_options": {
-    "system_prompt": "你是一个有帮助的助手",
-    "permission_mode": "acceptEdits"
-  }
-}
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     用户配置的存储位置                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  users 表字段：                                                          │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  - default_model      → 用户默认模型（单值）                              │
+│  - mcp_servers        → MCP Server 配置（JSON）                          │
+│  - agent_options      → Agent 运行选项（JSON）                           │
+│                                                                         │
+│  user_tool_permissions 表：                                              │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  - 工具权限配置（独立表，每用户每工具一条记录）                             │
+│  - 字段：user_id, tool_name, enabled, requires_confirmation             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**配置项说明：**
+### 4.3 用户工具权限示例数据
 
-| 配置项 | 说明 |
-|------|------|
-| default_model | 用户默认使用的模型 |
-| tools | 工具权限配置（每个工具的启用状态、是否需要确认） |
-| mcp_servers | 用户自定义的 MCP Server |
-| agent_options | Agent 运行选项 |
+**user_tool_permissions 表数据：**
 
-### 4.3 认证流程
+| user_id | tool_name | enabled | requires_confirmation |
+|---------|-----------|---------|----------------------|
+| user-001 | Bash | true | true |
+| user-001 | Read | true | false |
+| user-001 | Write | true | true |
+| user-001 | Edit | true | true |
+| user-001 | WebSearch | true | false |
+| user-002 | Bash | false | false |
+| user-002 | Read | true | false |
+| ... | ... | ... | ... |
+
+### 4.4 认证流程
 
 ```mermaid
 sequenceDiagram
@@ -672,7 +659,7 @@ MySQL 更新 token 统计
 |  工具权限设置                                     |
 +--------------------------------------------------+
 |                                                  |
-|  工具列表：                                       |
+|  工具列表（从 user_tool_permissions 表加载）：    |
 |  +--------------------------------------------+  |
 |  | 工具名称 | 启用 | 需确认 |                  |  |
 |  +--------------------------------------------+  |
@@ -687,6 +674,12 @@ MySQL 更新 token 统计
 |  [保存设置]                                       |
 +--------------------------------------------------+
 ```
+
+**保存逻辑：**
+
+- 模型设置 → 更新 users.default_model 字段
+- 工具权限 → 批量更新 user_tool_permissions 表
+- MCP Server → 更新 users.mcp_servers JSON 字段
 
 ---
 
@@ -736,13 +729,13 @@ MySQL 更新 token 统计
 
 | API | 方法 | 说明 |
 |------|------|------|
-| `/api/settings` | GET | 获取用户全部设置 |
-| `/api/settings` | PUT | 更新用户全部设置 |
+| `/api/settings` | GET | 获取用户全部设置（含工具权限） |
 | `/api/settings/model` | GET/PUT | 默认模型设置 |
-| `/api/settings/tools` | GET/PUT | 工具权限设置 |
-| `/api/settings/tools/{name}` | GET/PUT | 单个工具设置 |
-| `/api/settings/mcp-servers` | GET/POST/DELETE | MCP Server 配置 |
+| `/api/settings/mcp-servers` | GET/PUT | MCP Server 配置 |
 | `/api/settings/agent-options` | GET/PUT | Agent 选项设置 |
+| `/api/settings/tools` | GET | 获取用户所有工具权限 |
+| `/api/settings/tools` | PUT | 批量更新工具权限 |
+| `/api/settings/tools/{name}` | GET/PUT | 单个工具权限设置 |
 
 ---
 
@@ -752,10 +745,12 @@ MySQL 更新 token 统计
 
 ```mermaid
 flowchart TD
-    LOGIN["用户登录"] --> GET_USER["获取用户信息"]
-    GET_USER --> LOAD_SETTINGS["加载 settings 字段"]
+    LOGIN["用户登录"] --> GET_USER["获取用户信息<br/>（users表）"]
+    GET_USER --> GET_TOOLS["获取工具权限<br/>（user_tool_permissions表）"]
     
-    LOAD_SETTINGS --> PARSE["解析配置"]
+    GET_USER --> PARSE["解析用户配置"]
+    GET_TOOLS --> PARSE
+    
     PARSE --> MERGE["合并系统默认配置"]
     
     MERGE --> BUILD_OPTIONS["构建 ClaudeAgentOptions"]
@@ -764,7 +759,36 @@ flowchart TD
     CREATE_AGENT --> RUN["运行 Agent"]
 ```
 
-### 8.2 配置优先级
+### 8.2 配置存储分布
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        配置存储分布                                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  users 表（用户基本配置）：                                                │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  - default_model      VARCHAR(50)   默认模型                             │
+│  - mcp_servers        JSON          MCP Server 配置                      │
+│  - agent_options      JSON          Agent 运行选项                        │
+│                                                                         │
+│  user_tool_permissions 表（工具权限）：                                    │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  - user_id            VARCHAR(36)   用户ID                               │
+│  - tool_name          VARCHAR(50)   工具名称                             │
+│  - enabled            BOOLEAN       是否启用                             │
+│  - requires_confirmation  BOOLEAN   是否需要确认                         │
+│                                                                         │
+│  system_config 表（系统默认）：                                            │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  - default_model                    系统默认模型                          │
+│  - available_models                 可用模型列表                          │
+│  - default_tools_config             工具默认配置                          │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.3 配置优先级
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -773,8 +797,9 @@ flowchart TD
 │                                                                         │
 │  优先级从高到低：                                                         │
 │                                                                         │
-│  1. 用户个人设置（users.settings）                                        │
-│     - 用户自己配置的模型、工具权限等                                       │
+│  1. 用户个人配置                                                          │
+│     - users 表：default_model, mcp_servers, agent_options               │
+│     - user_tool_permissions 表：工具权限                                  │
 │                                                                         │
 │  2. 系统默认配置（system_config 表）                                      │
 │     - 用户没有设置时使用的默认值                                           │
@@ -783,7 +808,34 @@ flowchart TD
 │  - 用户设置了 → 用用户设置                                                │
 │  - 用户没设置 → 用系统默认                                                │
 │                                                                         │
+│  工具权限：                                                               │
+│  - 新用户注册时，自动创建默认工具权限记录                                   │
+│  - 用户可修改自己的工具权限                                               │
+│                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.4 新用户初始化
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant API as API
+    participant DB as MySQL
+
+    User->>API: POST /api/auth/register
+    API->>DB: INSERT users (default_model=NULL...)
+    
+    Note over API: 获取系统默认工具列表
+    
+    API->>DB: SELECT system_config WHERE key='default_tools_config'
+    DB-->>API: 默认工具配置
+    
+    Note over API: 为新用户创建默认工具权限
+    
+    API->>DB: INSERT user_tool_permissions<br/>(Bash, Read, Write, Edit...)
+    
+    API-->>User: 注册成功
 ```
 
 ### 8.3 系统默认配置
@@ -807,23 +859,30 @@ flowchart TD
 │                    工具权限存储位置                                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  用户个人配置（users.settings 字段）：                                     │
+│  user_tool_permissions 表（独立数据表）：                                  │
 │                                                                         │
-│  {                                                                      │
-│    "tools": {                                                           │
-│      "Bash": {                                                          │
-│        "enabled": true,          ← 是否启用此工具                        │
-│        "requires_confirmation": true  ← 执行前是否需要确认               │
-│      },                                                                 │
-│      "Read": {                                                          │
-│        "enabled": true,                                                 │
-│        "requires_confirmation": false                                   │
-│      },                                                                 │
-│      ...                                                                │
-│    }                                                                    │
-│  }                                                                      │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │  user_id       VARCHAR(36)    用户ID                              │ │
+│  │  tool_name     VARCHAR(50)    工具名称                            │ │
+│  │  enabled       BOOLEAN        是否启用此工具                       │ │
+│  │  requires_confirmation  BOOLEAN   执行前是否需要确认               │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
-│  每个用户独立配置，互不影响                                                │
+│  每个用户每个工具一条记录，便于：                                          │
+│  - 查询用户所有工具权限                                                   │
+│  - 批量更新权限配置                                                       │
+│  - 统计分析用户权限设置                                                   │
+│                                                                         │
+│  示例数据：                                                               │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  user_id | tool_name | enabled | requires_confirmation          │   │
+│  │  ─────────────────────────────────────────────────────────────  │   │
+│  │  user-001 | Bash     | true    | true                           │   │
+│  │  user-001 | Read     | true    | false                          │   │
+│  │  user-001 | Write    | true    | true                           │   │
+│  │  user-002 | Bash     | false   | false                          │   │
+│  │  user-002 | Read     | true    | false                          │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -868,7 +927,7 @@ sequenceDiagram
     participant Agent as Agent
     participant SDK as Claude SDK
     participant Hook as PreToolUse Hook
-    participant DB as MySQL (users.settings)
+    participant DB as MySQL (user_tool_permissions)
     participant User as 用户
 
     Agent->>SDK: 决定执行 Bash 工具
@@ -877,7 +936,7 @@ sequenceDiagram
     
     SDK->>Hook: 调用 Hook，传入 tool_name="Bash"
     
-    Hook->>DB: 获取当前用户的 settings.tools.Bash
+    Hook->>DB: SELECT FROM user_tool_permissions<br/>WHERE user_id=current_user AND tool_name="Bash"
     DB-->>Hook: {enabled: true, requires_confirmation: true}
     
     Note over Hook: Hook 检查用户配置
@@ -1067,8 +1126,9 @@ agent_platform/
 
 | 表名 | 说明 |
 |------|------|
-| users | 用户表（含 settings） |
+| users | 用户表（含基本设置） |
 | sessions | Session 元数据表 |
+| user_tool_permissions | 用户工具权限表 |
 | system_config | 系统默认配置表 |
 
 ### 11.2 Session 存储架构
@@ -1106,9 +1166,27 @@ agent_platform/
 | username | VARCHAR(50) | 用户名 |
 | email | VARCHAR(100) | 邮箱 |
 | password_hash | VARCHAR(255) | 密码哈希 |
-| settings | JSON | 用户个人配置 |
+| default_model | VARCHAR(50) | 默认模型 |
+| mcp_servers | JSON | MCP Server 配置 |
+| agent_options | JSON | Agent 选项 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
+
+**用户工具权限表 (user_tool_permissions)：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INT AUTO_INCREMENT | 主键 |
+| user_id | VARCHAR(36) | 用户 ID（外键） |
+| tool_name | VARCHAR(50) | 工具名称 |
+| enabled | BOOLEAN | 是否启用 |
+| requires_confirmation | BOOLEAN | 是否需要确认 |
+| created_at | TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | 更新时间 |
+
+**索引：**
+- UNIQUE(user_id, tool_name) — 每用户每工具唯一
+- INDEX(user_id) — 查询用户所有权限
 
 **Session 表 (sessions)：**
 
