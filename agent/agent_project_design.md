@@ -17,18 +17,17 @@
 6. [前端页面设计](#6-前端页面设计)
 7. [后端 API 设计](#7-后端-api设计)
 8. [模型配置设计](#8-模型配置设计)
-9. [Agent 模块设计](#9-agent-模块设计)
-10. [工具系统设计](#10-工具系统设计)
-   - 10.1 工具来源
-   - 10.2 工具权限设计
-   - 10.3 工具权限数据模型
-   - 10.4 工具权限检查流程
-   - 10.5 实际场景示例
-   - 10.6 前端确认框设计
-   - 10.7 工具权限配置 API
-11. [项目目录结构](#11-项目目录结构)
-12. [数据库设计](#12-数据库设计)
-13. [实施计划](#13-实施计划)
+9. [工具系统设计](#9-工具系统设计)
+   - 9.1 工具来源
+   - 9.2 工具权限设计
+   - 9.3 工具权限数据模型
+   - 9.4 工具权限检查流程
+   - 9.5 实际场景示例
+   - 9.6 前端确认框设计
+   - 9.7 工具权限配置 API
+10. [项目目录结构](#10-项目目录结构)
+11. [数据库设计](#11-数据库设计)
+12. [实施计划](#12-实施计划)
 
 ---
 
@@ -39,9 +38,9 @@
 构建一个多用户 Agent 应用平台，包含：
 
 - **用户聊天页面**：多轮对话、历史 Session 查看
-- **后台设置页面**：模型配置、权限管理、工具配置
-- **多用户系统**：用户隔离、独立配置、Session 管理
-- **Agent 能力**：智能对话、工具调用、多 Agent 协作
+- **后台设置页面**：模型配置、工具权限配置
+- **多用户系统**：用户隔离、Session 管理
+- **Agent 能力**：智能对话、工具调用
 
 ### 1.2 核心功能模块
 
@@ -49,7 +48,7 @@
 graph TB
     subgraph FRONTEND["前端"]
         CHAT["聊天页面<br/>对话 / Session 历史"]
-        SETTINGS["后台设置<br/>模型 / 权限 / 工具"]
+        SETTINGS["后台设置<br/>模型 / 工具权限"]
     end
 
     subgraph BACKEND["后端"]
@@ -82,8 +81,7 @@ graph TB
 | 角色 | 权限 | 功能 |
 |------|------|------|
 | 普通用户 | 聊天、查看自己的 Session | 聊天页面 |
-| 管理员 | 所有配置 + 用户管理 | 后台设置页面 |
-| 超级管理员 | 系统级配置 | 全部功能 |
+| 管理员 | 后台设置、用户管理、配置管理 | 聊天页面 + 后台设置页面 |
 
 ### 1.4 技术栈
 
@@ -270,7 +268,7 @@ sequenceDiagram
 | username | VARCHAR(50) | 用户名 |
 | email | VARCHAR(100) | 邮箱 |
 | password_hash | VARCHAR(255) | 密码（bcrypt加密） |
-| role | VARCHAR(20) | 角色：user, admin, super_admin |
+| role | VARCHAR(20) | 角色：user, admin |
 | settings | JSON | 用户个人设置 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
@@ -280,10 +278,7 @@ sequenceDiagram
 | 设置项 | 说明 |
 |------|------|
 | default_model | 用户默认模型 |
-| permission_mode | 权限模式 |
-| allowed_tools | 用户可用工具列表 |
 | max_sessions | 最大 Session 数量 |
-| max_tokens_per_session | 单 Session 最大 tokens |
 
 ### 4.2 认证流程
 
@@ -611,13 +606,12 @@ MySQL 更新 token 统计
 │   │   ├── 消息列表（用户/助手消息）
 │   │   ├── 工具调用展示
 │   │   └── 流式输出动画
-│   └── InputArea：输入框、发送按钮、Agent 选择
+│   └── InputArea：输入框、发送按钮
 │
 └── 后台设置页面（管理员）
     ├── 用户管理
+    ├── 工具权限配置
     ├── 模型配置
-    ├── Agent 配置
-    ├── 工具配置
     └── 系统设置
 ```
 
@@ -641,7 +635,7 @@ MySQL 更新 token 统计
 | ...      |  +-------------------------------+   |
 |          |                                       |
 |          |  +-------------------------------+   |
-|          |  | 输入框 | Agent选择 | 发送     |   |
+|          |  | 输入框 | 发送                  |   |
 |          |  +-------------------------------+   |
 +--------------------------------------------------+
 ```
@@ -666,7 +660,6 @@ MySQL 更新 token 统计
 | 用户管理 | 用户列表、添加/编辑用户、更改角色 |
 | 工具权限配置 | 工具列表、编辑权限、设置确认要求 |
 | 模型配置 | 可用模型列表、默认模型 |
-| Agent 配置 | Agent 类型管理、System Prompt |
 | 系统设置 | API Key、成本监控 |
 
 **工具权限配置页面：**
@@ -677,19 +670,19 @@ MySQL 更新 token 统计
 +--------------------------------------------------+
 |                                                  |
 |  +--------------------------------------------+  |
-|  | 工具名称 | 允许角色  | 需确认 | 启用 | 操作 |  |
+|  | 工具名称 | 允许角色 | 需确认 | 启用 | 操作   |  |
 |  +--------------------------------------------+  |
-|  | Bash    | admin+  | ✓     | ✓   | [编辑] |  |
-|  | Read    | all     | ✗     | ✓   | [编辑] |  |
-|  | Write   | admin+  | ✓     | ✓   | [编辑] |  |
-|  | Edit    | admin+  | ✓     | ✓   | [编辑] |  |
-|  | WebSearch| all    | ✗     | ✓   | [编辑] |  |
-|  | WebFetch | all    | ✗     | ✓   | [编辑] |  |
+|  | Bash    | admin   | ✓     | ✓   | [编辑]  |  |
+|  | Read    | all     | ✗     | ✓   | [编辑]  |  |
+|  | Write   | admin   | ✓     | ✓   | [编辑]  |  |
+|  | Edit    | admin   | ✓     | ✓   | [编辑]  |  |
+|  | WebSearch| all    | ✗     | ✓   | [编辑]  |  |
+|  | WebFetch | all    | ✗     | ✓   | [编辑]  |  |
 |  +--------------------------------------------+  |
 |                                                  |
 |  说明：                                           |
-|  - admin+ = admin 和 super_admin                 |
-|  - all = 所有角色（user, admin, super_admin）    |
+|  - admin = 管理员                                 |
+|  - all = 所有角色（user, admin）                  |
 |  - 需确认 = 执行前需要用户点击确认                 |
 |                                                  |
 +--------------------------------------------------+
@@ -708,7 +701,6 @@ MySQL 更新 token 统计
 |  允许的角色：                                     |
 |  [ ] 普通用户 (user)                              |
 |  [✓] 管理员 (admin)                               |
-|  [✓] 超级管理员 (super_admin)                     |
 |                                                  |
 |  执行前需要确认：[✓]                              |
 |                                                  |
@@ -730,7 +722,7 @@ MySQL 更新 token 统计
 | 用户 | `/api/users` | 用户 CRUD、权限管理 |
 | Session | `/api/sessions` | Session 管理、历史查询 |
 | 聊天 | `/api/chat` | WebSocket、消息发送 |
-| 配置 | `/api/config` | 模型、Agent、工具配置 |
+| 配置 | `/api/config` | 模型、工具配置 |
 
 ### 7.2 API 详细列表
 
@@ -781,8 +773,6 @@ MySQL 更新 token 统计
 | `/api/config/models` | GET | 获取可用模型列表 |
 | `/api/config/models` | PUT | 更新模型配置 |
 | `/api/config/default-model` | GET/PUT | 默认模型 |
-| `/api/config/agents` | GET/POST | Agent 类型管理 |
-| `/api/config/agents/{id}` | PUT/DELETE | 更新/删除 Agent |
 | `/api/config/tools` | GET | 获取所有工具配置 |
 | `/api/config/tools/{name}` | GET | 获取单个工具配置 |
 | `/api/config/tools/{name}` | PUT | 更新工具权限配置 |
@@ -839,51 +829,9 @@ flowchart TD
 
 ---
 
-## 9. Agent 模块设计
+## 9. 工具系统设计
 
-### 9.1 Agent 类型
-
-| Agent 类型 | 主要能力 | 建议模型 |
-|------------|----------|----------|
-| Assistant | 通用助手 | claude-sonnet-4-5 |
-| Researcher | 信息检索、分析、报告 | claude-sonnet-4-5 |
-| Coder | 代码开发、调试、测试 | claude-sonnet-4-5 |
-| Coordinator | 任务分解、分配、监控 | claude-opus-4-6 |
-
-### 9.2 Agent 配置数据模型
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | UUID | 配置 ID |
-| name | VARCHAR(50) | Agent 名称（researcher） |
-| display_name | VARCHAR(100) | 显示名称（研究员） |
-| description | TEXT | 描述 |
-| system_prompt | TEXT | System Prompt |
-| allowed_tools | JSON | 允许的工具列表 |
-| disallowed_tools | JSON | 禁用的工具列表 |
-| default_model | VARCHAR(50) | 默认模型 |
-| allowed_roles | JSON | 允许的角色 |
-| is_enabled | BOOLEAN | 是否启用 |
-
-### 9.3 Agent 配置流程
-
-```mermaid
-flowchart TD
-    ADMIN["管理员"] --> CONFIG["后台配置 Agent"]
-    CONFIG --> DB["保存到 agent_types 表"]
-    
-    USER["用户发起对话"] --> SELECT["选择 Agent 类型"]
-    SELECT --> LOAD["从 DB 加载配置"]
-    LOAD --> BUILD["构建 ClaudeAgentOptions"]
-    BUILD --> CREATE["创建 ClaudeSDKClient"]
-    CREATE --> RUN["运行 Agent"]
-```
-
----
-
-## 10. 工具系统设计
-
-### 10.1 工具来源
+### 9.1 工具来源
 
 | 来源 | 说明 |
 |------|------|
@@ -891,7 +839,7 @@ flowchart TD
 | 自定义工具 | SDK MCP Server（in-process） |
 | 外部 MCP Server | 配置的外部 MCP 服务 |
 
-### 10.2 工具权限设计
+### 9.2 工具权限设计
 
 **权限设计简化：**
 
@@ -905,7 +853,6 @@ flowchart TD
 │  用户角色权限 → 固定                                                      │
 │  - 普通用户：聊天、查看自己的 Session                                      │
 │  - 管理员：后台设置、用户管理                                              │
-│  - 超级管理员：全部                                                       │
 │                                                                         │
 │  数据权限 → 固定                                                          │
 │  - 用户只能看到自己的 Session                                              │
@@ -922,7 +869,7 @@ flowchart TD
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 10.3 工具权限数据模型
+### 9.3 工具权限数据模型
 
 **tool_configs 表：**
 
@@ -933,22 +880,21 @@ flowchart TD
 | description | TEXT | 描述 |
 | is_builtin | BOOLEAN | 是否内置工具 |
 | is_enabled | BOOLEAN | 是否启用 |
-| allowed_roles | JSON | 允许的角色，如 `["user", "admin", "super_admin"]` |
+| allowed_roles | JSON | 允许的角色，如 `["user", "admin"]` |
 | requires_confirmation | BOOLEAN | 执行前是否需要用户确认 |
 
 **示例数据：**
 
 | name | allowed_roles | requires_confirmation | is_enabled |
 |------|---------------|----------------------|------------|
-| Bash | ["admin", "super_admin"] | true | true |
-| Read | ["user", "admin", "super_admin"] | false | true |
-| Write | ["admin", "super_admin"] | true | true |
-| Edit | ["admin", "super_admin"] | true | true |
-| WebSearch | ["user", "admin", "super_admin"] | false | true |
-| WebFetch | ["user", "admin", "super_admin"] | false | true |
-| Agent | ["super_admin"] | true | true |
+| Bash | ["admin"] | true | true |
+| Read | ["user", "admin"] | false | true |
+| Write | ["admin"] | true | true |
+| Edit | ["admin"] | true | true |
+| WebSearch | ["user", "admin"] | false | true |
+| WebFetch | ["user", "admin"] | false | true |
 
-### 10.4 工具权限检查流程
+### 9.4 工具权限检查流程
 
 ```mermaid
 flowchart TD
@@ -969,14 +915,14 @@ flowchart TD
     USER -->|"拒绝"| DENY3["拒绝：用户取消"]
 ```
 
-### 10.5 实际场景示例
+### 9.5 实际场景示例
 
 **场景1：普通用户使用 Read 工具**
 
 ```
 用户角色：user
 工具：Read
-配置：allowed_roles = [user, admin, super_admin]
+配置：allowed_roles = [user, admin]
       requires_confirmation = false
 
 流程：
@@ -998,7 +944,7 @@ user 在 allowed_roles 中？ → 是
 ```
 用户角色：user
 工具：Bash
-配置：allowed_roles = [admin, super_admin]
+配置：allowed_roles = [admin]
       requires_confirmation = true
 
 流程：
@@ -1016,7 +962,7 @@ user 在 allowed_roles 中？ → 否
 ```
 用户角色：admin
 工具：Bash
-配置：allowed_roles = [admin, super_admin]
+配置：allowed_roles = [admin]
       requires_confirmation = true
 
 流程：
@@ -1037,7 +983,7 @@ admin 在 allowed_roles 中？ → 是
 结果：成功执行
 ```
 
-### 10.6 前端确认框设计
+### 9.6 前端确认框设计
 
 当工具需要确认时，前端弹出确认框：
 
@@ -1069,7 +1015,7 @@ admin 在 allowed_roles 中？ → 是
 | Edit | 显示 old_string 和 new_string 的摘要 |
 | WebFetch | 显示 URL |
 
-### 10.7 工具权限配置 API
+### 9.7 工具权限配置 API
 
 | API | 方法 | 说明 |
 |------|------|------|
@@ -1080,7 +1026,7 @@ admin 在 allowed_roles 中？ → 是
 
 ---
 
-## 11. 项目目录结构
+## 10. 项目目录结构
 
 ```
 agent_platform/
@@ -1128,21 +1074,20 @@ agent_platform/
 
 ---
 
-## 12. 数据库设计（MySQL）
+## 11. 数据库设计（MySQL）
 
-### 12.1 数据表概览
+### 11.1 数据表概览
 
 | 表名 | 说明 |
 |------|------|
 | users | 用户表 |
 | sessions | Session 元数据表 |
-| agent_types | Agent 类型配置表 |
 | model_configs | 模型配置表 |
 | tool_configs | 工具配置表 |
 | mcp_servers | MCP Server 配置表 |
 | system_config | 系统配置表 |
 
-### 12.2 Session 存储架构
+### 11.2 Session 存储架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -1167,7 +1112,7 @@ agent_platform/
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 12.3 数据表字段设计
+### 11.3 数据表字段设计
 
 **用户表：**
 
@@ -1177,7 +1122,7 @@ agent_platform/
 | username | VARCHAR(50) | 用户名 |
 | email | VARCHAR(100) | 邮箱 |
 | password_hash | VARCHAR(255) | 密码哈希 |
-| role | VARCHAR(20) | 角色 |
+| role | VARCHAR(20) | 角色：user, admin |
 | settings | JSON | 个人设置 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
@@ -1190,28 +1135,12 @@ agent_platform/
 | user_id | VARCHAR(36) | 用户 ID |
 | title | VARCHAR(200) | 标题 |
 | model | VARCHAR(50) | 模型 |
-| agent_type | VARCHAR(50) | Agent 类型 |
 | status | VARCHAR(20) | 状态 |
 | total_input_tokens | INT | 输入 tokens |
 | total_output_tokens | INT | 输出 tokens |
 | total_cost | DECIMAL(10,4) | 成本 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
-
-**Agent 类型表 (agent_types)：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | VARCHAR(36) | UUID |
-| name | VARCHAR(50) | Agent 名称 |
-| display_name | VARCHAR(100) | 显示名称 |
-| description | TEXT | 描述 |
-| system_prompt | TEXT | System Prompt |
-| allowed_tools | JSON | 允许工具 |
-| disallowed_tools | JSON | 禁用工具 |
-| default_model | VARCHAR(50) | 默认模型 |
-| allowed_roles | JSON | 允许角色 |
-| is_enabled | BOOLEAN | 是否启用 |
 
 **模型配置表 (model_configs)：**
 
@@ -1225,7 +1154,6 @@ agent_platform/
 | max_output_tokens | INT | 最大 tokens |
 | input_cost_per_1k | DECIMAL(10,4) | 输入成本 |
 | output_cost_per_1k | DECIMAL(10,4) | 输出成本 |
-| allowed_roles | JSON | 允许角色 |
 
 **工具配置表 (tool_configs)：**
 
@@ -1253,26 +1181,26 @@ agent_platform/
 
 ---
 
-## 13. 实施计划
+## 12. 实施计划
 
-### 13.1 开发阶段（总计 6 周）
+### 12.1 开发阶段（总计 6 周）
 
 | 阶段 | 时间 | 任务 | 产出 |
 |------|------|------|------|
 | Phase 1 | 第 1 周 | 后端基础 + 用户系统 | 用户认证 API、数据库 |
 | Phase 2 | 第 2 周 | Session 管理 + Agent 核心 | Session API、Agent 引擎 |
 | Phase 3 | 第 3 周 | 前端聊天页面 | 聊天 UI、WebSocket |
-| Phase 4 | 第 4 周 | 前端后台设置页面 | 模型/Agent 配置 UI |
+| Phase 4 | 第 4 周 | 前端后台设置页面 | 工具权限配置 UI |
 | Phase 5 | 第 5 周 | 自定义工具 + Hooks | 业务工具集成 |
 | Phase 6 | 第 6 周 | 测试 + 部署 | 完整系统上线 |
 
-### 13.2 验收标准
+### 12.2 验收标准
 
 | 标准 | 要求 |
 |------|------|
 | 多用户支持 | 用户注册/登录、角色权限、配置隔离 |
 | 聊天功能 | 多轮对话、流式输出、Session 历史 |
-| 后台配置 | 模型配置、Agent 配置、工具配置、用户管理 |
+| 后台配置 | 工具权限配置、模型配置、用户管理 |
 | 数据持久化 | Session 存储、配置存储、用户数据 |
 | 安全认证 | JWT 认证、权限控制、数据隔离 |
 | 性能 | WebSocket 流式响应 < 100ms |
