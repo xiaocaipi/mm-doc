@@ -321,31 +321,151 @@ sequenceDiagram
 
 ## 5. Session 管理设计
 
-### 5.1 DB Session 与 SDK Session 关联机制
+### 5.1 核心概念：两种 Session
 
-**两种 Session 的区别与关联：**
+**用"书"的比喻来理解：**
 
-```mermaid
-flowchart LR
-    subgraph DB_SESSION["DB Session (MySQL)"]
-        direction TB
-        DB_ID["session_id (UUID)"]
-        DB_META["元数据<br/>- user_id<br/>- title<br/>- model<br/>- agent_type<br/>- token统计"]
-        DB_PURPOSE["用途：<br/>- 用户查看历史列表<br/>- 权限验证<br/>- 成本统计"]
-    end
-
-    subgraph SDK_SESSION["SDK Session (SessionStore)"]
-        direction TB
-        SDK_ID["session_id (同一个UUID)"]
-        SDK_CONTENT["内容<br/>- messages<br/>- context<br/>- metadata"]
-        SDK_PURPOSE["用途：<br/>- Agent 对话上下文<br/>- 会话恢复<br/>- 消息持久化"]
-        SDK_STORE["存储：<br/>- Redis (活跃)<br/>- 文件 (历史)"]
-    end
-
-    DB_ID -.->|"关联标识"| SDK_ID
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     "聊天对话" 的两层信息                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  类比：一本书                                                            │
+│                                                                         │
+│  ┌─────────────────────┐        ┌─────────────────────────────┐        │
+│  │  书的封面/目录       │        │  书的内容（正文）            │        │
+│  │  (DB Session)       │        │  (SDK Session)              │        │
+│  │                     │        │                             │        │
+│  │  - 书名 → 对话标题   │        │  - 第1章 → 第1条消息        │        │
+│  │  - 作者 → 用户      │        │  - 第2章 → 第2条消息        │        │
+│  │  - 页数 → token数   │        │  - 第3章 → 第3条消息        │        │
+│  │  - 分类 → Agent类型 │        │  ...                        │        │
+│  │                     │        │                             │        │
+│  │  存在：MySQL         │        │  存在：SessionStore         │        │
+│  │                     │        │  (Redis/MySQL/文件)         │        │
+│  │  用途：              │        │                             │        │
+│  │  - 快速找书          │        │  用途：                      │        │
+│  │  - 统计有多少书      │        │  - 阅读内容                 │        │
+│  │  - 不打开就能看      │        │  - 继续阅读（恢复对话）     │        │
+│  │    基本信息          │        │  - Agent 需要内容才能回答  │        │
+│  └─────────────────────┘        └─────────────────────────────┘        │
+│                                                                         │
+│  关联方式：书的 ID = 内容的 ID（同一个标识）                               │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**关联流程：**
+**两种 Session 的具体内容：**
+
+| 类型 | 名称 | 存储位置 | 内容 | 用途 |
+|------|------|----------|------|------|
+| DB Session | 业务 Session | MySQL | session_id, title, model, tokens... | 用户查看历史列表、权限验证、成本统计 |
+| SDK Session | Agent Session | SessionStore | messages, context... | Agent 对话上下文、会话恢复、消息持久化 |
+
+### 5.2 SessionStore 的位置与实现
+
+**SessionStore 与 SDK 的关系：**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        SessionStore 的关系                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   Claude Agent SDK                                                      │
+│   ┌─────────────────────────────────────────────────────┐              │
+│   │                                                     │              │
+│   │   SDK 提供：                                        │              │
+│   │   - SessionStore 接口定义（规定要实现哪些方法）      │              │
+│   │   - 调用 SessionStore 的时机                        │              │
+│   │                                                     │              │
+│   │   接口方法：                                        │              │
+│   │   ┌─────────────────────────────────────┐          │              │
+│   │   │  save(messages, metadata)           │          │              │
+│   │   │  load() → messages, metadata        │          │              │
+│   │   └─────────────────────────────────────┘          │              │
+│   │              ↑                                    │              │
+│   │              │ 我们自己实现                        │              │
+│   │              │                                    │              │
+│   │   我们实现：                                       │              │
+│   │   ┌─────────────────────────────────────┐          │              │
+│   │   │  MySQLSessionStore                  │          │              │
+│   │   │  - save(): 存到我们选择的位置       │          │              │
+│   │   │  - load(): 从我们选择的位置读       │          │              │
+│   │   └─────────────────────────────────────┘          │              │
+│   │                                                     │              │
+│   │   SDK 运行时自动调用：                              │              │
+│   │   - 每轮对话结束 → 调用 save()                     │              │
+│   │   - 启动 Agent → 调用 load()                      │              │
+│   │                                                     │              │
+│   └─────────────────────────────────────────────────────┘              │
+│                                                                         │
+│   我们传给 SDK：                                                         │
+│   ClaudeSDKClient(session_store=我们实现的SessionStore)                 │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**一句话总结：**
+
+> SessionStore 的"规则"在 SDK 里（接口定义），"具体怎么存"由我们实现。SDK 在需要保存/加载消息时，会自动调用我们写的代码。
+
+### 5.3 SessionStore 存储位置选择
+
+**可以存到哪里：**
+
+| 存储位置 | 适合场景 | 性能 | 成本 | 复杂度 |
+|----------|----------|------|------|--------|
+| **Redis** | 活跃对话（正在进行） | 最快 | 高（内存） | 低 |
+| **MySQL** | 持久化存储 | 中 | 低 | 中 |
+| **文件系统** | 大量历史对话 | 慢 | 最低 | 中 |
+| **组合方案** | 推荐 | 快+持久 | 中 | 中 |
+
+**各方案对比：**
+
+| 方案 | 说明 | 优点 | 缺点 |
+|------|------|------|------|
+| 全存 MySQL | Session 内容存到 MySQL 的 JSON 字段 | 简单、可查询、持久化 | 频繁写入可能慢、表会变大 |
+| 全存 Redis | Session 内容存到 Redis | 最快、适合频繁更新 | 内存成本高、需设置过期 |
+| Redis + 文件 | 活跃存 Redis，历史存文件 | 快+持久+低成本 | 需管理两个存储 |
+| Redis + MySQL | 活跃存 Redis，历史存 MySQL | 快+持久+可查询 | 需管理两个存储 |
+
+### 5.4 推荐方案
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      推荐的组合方案                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Session 元数据 → MySQL                                         │
+│  - session_id, title, user_id, tokens, cost                    │
+│  - 查询列表、统计、权限验证                                       │
+│                                                                 │
+│  Session 内容 → Redis + MySQL/文件                              │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  活跃对话 → Redis                                        │   │
+│  │  - 正在进行的对话                                         │   │
+│  │  - 读写最快                                               │   │
+│  │  - 设置过期时间（如 24 小时）                              │   │
+│  │                                                         │   │
+│  │  历史对话 → MySQL/文件                                    │   │
+│  │  - Redis 过期后迁移到这里                                 │   │
+│  │  - 持久保存                                               │   │
+│  │  - 成本更低                                               │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  简化方案：全存 MySQL                                            │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  如果对话量不大，可直接全存 MySQL                          │   │
+│  │  - 新增 sessions_content 表                              │   │
+│  │  - 字段：session_id, messages(JSON), updated_at          │   │
+│  │  - 架构简单，少依赖                                        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 5.5 Session 关联流程
 
 ```mermaid
 sequenceDiagram
@@ -359,35 +479,35 @@ sequenceDiagram
     API->>DB: INSERT sessions (user_id...)
     DB-->>API: session_id = "abc-123"
     
-    Note over API,Store: DB Session 创建完成
+    Note over API,Store: DB Session 创建完成，获得 session_id
 
     User->>API: 发送消息 (session_id="abc-123")
     API->>DB: SELECT sessions WHERE id="abc-123"
     DB-->>API: Session 元数据
     
-    API->>Store: SessionStore("abc-123", user_id)
-    Note over Store: 用 DB session_id 作为标识
+    API->>Store: 创建 SessionStore("abc-123")
+    Note over Store: 用 DB session_id 作为 SessionStore 的标识
     
     API->>SDK: ClaudeSDKClient(session_store=Store)
     SDK->>Store: load() 加载历史消息
-    Store-->>SDK: messages=[] (新Session)
+    Store-->>SDK: messages=[] (新Session为空)
     
     SDK->>SDK: 执行对话
-    SDK->>Store: save(messages) 保存
     
-    Note over Store,SDK: 每轮对话后自动保存
+    SDK->>Store: save(messages) 保存
+    Note over Store: SDK 每轮对话后自动调用 save
     
     API->>DB: UPDATE sessions (tokens, cost)
 ```
 
-### 5.2 Session 数据模型
+### 5.6 Session 数据模型
 
 **MySQL Session 表（元数据）：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | UUID | Session ID，关联 SDK SessionStore |
-| user_id | UUID | 所属用户 |
+| id | VARCHAR(36) | Session ID，关联 SessionStore |
+| user_id | VARCHAR(36) | 所属用户 |
 | title | VARCHAR(200) | Session 标题 |
 | model | VARCHAR(50) | 使用的模型 |
 | agent_type | VARCHAR(50) | Agent 类型 |
@@ -402,27 +522,67 @@ sequenceDiagram
 
 | 内容 | 说明 |
 |------|------|
-| session_id | 与 MySQL sessions.id 相同 |
-| messages | 对话消息列表 |
+| session_id | 与 MySQL sessions.id 相同（关联标识） |
+| messages | 对话消息列表（每条消息的完整内容） |
 | context | 对话上下文信息 |
 | metadata | token 统计、成本等 |
 
-### 5.3 Session 存储策略
+### 5.7 实际使用场景
 
-| 数据类型 | 存储位置 | 原因 |
-|----------|----------|------|
-| Session 元数据 | MySQL | 查询、过滤、统计、用户列表展示 |
-| Session 内容（活跃） | Redis | 快速访问、流式写入 |
-| Session 内容（历史） | 文件系统 | 大数据、持久化、低成本 |
-| Session 统计 | MySQL | 成本追踪、分析 |
+**场景1：用户查看历史列表**
 
-### 5.4 Session API 设计
+```
+用户打开聊天页面
+    ↓
+系统查询 MySQL sessions 表
+    ↓
+返回对话列表（只返回元数据，不加载内容）
+    ↓
+用户看到：
+    1. 研究React - 昨天 - 2000 tokens
+    2. 写HTTP服务 - 3天前 - 1500 tokens
+    ...
+    
+（这一步不需要 SessionStore，只查 MySQL）
+```
+
+**场景2：用户进入某个对话**
+
+```
+用户点击"研究React"
+    ↓
+系统用 session_id="abc-123" 创建 SessionStore
+    ↓
+SessionStore.load() 加载消息内容
+    ↓
+用户看到完整对话记录（10轮对话）
+    
+（这一步需要 SessionStore 加载内容）
+```
+
+**场景3：用户继续对话**
+
+```
+用户发送新消息："再写一个示例"
+    ↓
+Agent 用 SessionStore.load() 获取历史上下文
+    ↓
+Agent 看到之前的 React 讨论，理解上下文
+    ↓
+Agent 回复："好的，基于刚才讨论的特性..."
+    ↓
+SessionStore.save() 保存新消息
+    ↓
+MySQL 更新 token 统计
+```
+
+### 5.8 Session API 设计
 
 | API | 方法 | 说明 |
 |------|------|------|
-| `/api/sessions` | GET | 获取用户 Session 列表 |
+| `/api/sessions` | GET | 获取用户 Session 列表（只返回元数据） |
 | `/api/sessions` | POST | 创建新 Session |
-| `/api/sessions/{id}` | GET | 获取 Session 详情（含消息） |
+| `/api/sessions/{id}` | GET | 获取 Session 详情（含消息内容） |
 | `/api/sessions/{id}` | DELETE | 删除 Session |
 | `/api/sessions/{id}/title` | PATCH | 更新标题 |
 | `/api/sessions/{id}/archive` | PATCH | 归档 Session |
