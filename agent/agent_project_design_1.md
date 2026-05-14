@@ -173,49 +173,82 @@ graph TB
 
 ```mermaid
 flowchart TB
-    subgraph FRONTEND["前端应用"]
-        CHAT["聊天页面"]
-        SETTINGS["设置页面"]
-        SKILL_SETTINGS["技能包设置"]
-        BASE_SETTINGS["基础设置页面"]
+    %% ========== 样式定义 ==========
+    classDef frontend fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef backend fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef agent fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100
+    classDef storage fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#4a148c
+    classDef external fill:#eceff1,stroke:#455a64,stroke-width:2px,color:#263238
+
+    %% ========== 前端应用层 ==========
+    subgraph FRONTEND["🖥️ 前端应用"]
+        direction LR
+        CHAT["💬 聊天页面"]
+        SETTINGS["⚙️ 设置页面"]
+        SKILL_SETTINGS["📦 技能包设置"]
+        BASE_SETTINGS["🔧 基础设置页面"]
     end
 
-    subgraph BACKEND["后端"]
-        AUTH["认证"]
-        CHAT_API["聊天"]
-        SESSION["session"]
-        SETTINGS_API["设置"]
-        SKILLS["技能包"]
+    %% ========== 后端服务层 ==========
+    subgraph BACKEND["⚡ 后端服务"]
+        direction LR
+        AUTH["🔐 认证"]
+        CHAT_API["💬 聊天 API"]
+        SESSION["📁 Session"]
+        SETTINGS_API["⚙️ 设置 API"]
+        SKILLS["📦 技能包"]
     end
 
-    subgraph AGENT["agent"]
-        SDK["claude agent sdk"]
-        HOOKS["权限hooks"]
-        MCP["mcp"]
+    %% ========== Agent 引擎层 ==========
+    subgraph AGENT_ENGINE["🤖 Agent 引擎"]
+        direction LR
+        SDK["Claude Agent SDK"]
+        HOOKS["🔒 权限 Hooks"]
+        MCP["🔗 MCP"]
     end
 
-    subgraph STORAGE["存储"]
-        TIDB["tidb 业务数据"]
-        REDIS["redis<br/>session 缓存"]
+    %% ========== 数据存储层 ==========
+    subgraph STORAGE["💾 数据存储"]
+        direction LR
+        TIDB["🗄️ TiDB<br/>业务数据"]
+        REDIS["⚡ Redis<br/>Session 缓存"]
     end
 
-    CHAT --> CHAT_API
-    SETTINGS --> SKILL_SETTINGS
-    SETTINGS --> BASE_SETTINGS
-    SKILL_SETTINGS --> SKILLS
-    BASE_SETTINGS --> SETTINGS_API
+    %% ========== 外部服务 ==========
+    subgraph EXTERNAL["🌐 外部服务"]
+        direction LR
+        ANTHROPIC["Anthropic API"]
+        MCP_SERVERS["MCP Servers"]
+    end
 
-    CHAT_API --> SESSION
-    CHAT_API --> AGENT
-    AUTH --> TIDB
-    SESSION --> TIDB
-    SESSION --> REDIS
-    SETTINGS_API --> TIDB
-    SKILLS --> TIDB
+    %% ========== 前端 → 后端 数据流 ==========
+    CHAT -->|"WebSocket / HTTP"| CHAT_API
+    SETTINGS -->|"路由"| SKILL_SETTINGS
+    SETTINGS -->|"路由"| BASE_SETTINGS
+    SKILL_SETTINGS -->|"REST API"| SKILLS
+    BASE_SETTINGS -->|"REST API"| SETTINGS_API
 
-    SDK --> HOOKS
-    SDK --> MCP
-    CHAT_API --> SDK
+    %% ========== 后端内部 数据流 ==========
+    CHAT_API -->|"查询/保存"| SESSION
+    CHAT_API -->|"调用"| SDK
+    AUTH -->|"读写"| TIDB
+    SESSION -->|"元数据"| TIDB
+    SESSION -->|"消息内容"| REDIS
+    SETTINGS_API -->|"读写"| TIDB
+    SKILLS -->|"元数据"| TIDB
+
+    %% ========== Agent 引擎 数据流 ==========
+    SDK -->|"触发"| HOOKS
+    SDK -->|"调用"| MCP
+    SDK -->|"请求"| ANTHROPIC
+    MCP -->|"连接"| MCP_SERVERS
+
+    %% ========== 样式绑定 ==========
+    class CHAT,SETTINGS,SKILL_SETTINGS,BASE_SETTINGS frontend
+    class AUTH,CHAT_API,SESSION,SETTINGS_API,SKILLS backend
+    class SDK,HOOKS,MCP agent
+    class TIDB,REDIS storage
+    class ANTHROPIC,MCP_SERVERS external
 ```
 
 ### 3.2 核心数据流
