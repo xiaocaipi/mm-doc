@@ -2,8 +2,8 @@
 
 > 基于 Claude Agent SDK Python 构建多用户 Agent 应用平台
 >
-> 文档版本：v4.0
-> 日期：2026-05-13
+> 文档版本：v5.0
+> 日期：2026-05-14
 
 ---
 
@@ -221,6 +221,8 @@ flowchart TB
 
 ### 3.2 核心数据流
 
+**数据流一：普通聊天流程**
+
 ```mermaid
 sequenceDiagram
     participant User as 用户
@@ -258,6 +260,86 @@ sequenceDiagram
     SessionMgr->>DB: 持久化
 ```
 
+**数据流二：技能包创建流程（对话生成）**
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Frontend as 前端
+    participant API as FastAPI
+    participant Agent as Agent引擎
+    participant SDK as Claude SDK
+    participant DB as MySQL
+    participant FS as 文件系统
+
+    User->>Frontend: 描述需求："帮我创建一个台风响应流程..."
+    Frontend->>API: WebSocket 发送消息
+    API->>Agent: 启动 Agent
+    Agent->>SDK: 发送用户需求
+    
+    SDK->>SDK: 分析需求，提取流程步骤
+    SDK-->>Agent: 生成技能包定义
+    
+    Agent-->>API: 展示生成的技能包内容
+    API-->>Frontend: 流式返回
+    Frontend-->>User: 显示技能包定义（可修改）
+    
+    User->>Frontend: 确认保存（或修改后保存）
+    Frontend->>API: POST /api/skills/confirm
+    
+    API->>DB: INSERT user_skills (元数据)
+    API->>FS: 创建 .claude/skills/{user_id}/{skill_name}/SKILL.md
+    
+    API-->>Frontend: 保存成功
+    Frontend-->>User: 提示"技能包已创建，可使用 /技能包名称 调用"
+```
+
+**数据流三：技能包执行流程**
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Frontend as 前端
+    participant API as FastAPI
+    participant SkillMgr as 技能包管理
+    participant Agent as Agent引擎
+    participant SDK as Claude SDK
+    participant Tools as 自定义工具
+    participant DB as MySQL
+    participant FS as 文件系统
+
+    User->>Frontend: 输入 /台风积水检测
+    Frontend->>API: WebSocket 发送消息
+    
+    API->>SkillMgr: 解析技能包调用
+    SkillMgr->>DB: 查询 user_skills 表
+    DB-->>SkillMgr: 技能包元数据
+    
+    SkillMgr->>FS: 读取 SKILL.md 文件
+    FS-->>SkillMgr: 技能包定义内容
+    SkillMgr-->>API: 技能包完整定义
+    
+    API->>Agent: 启动 Agent（prompt=技能包内容）
+    Agent->>SDK: ClaudeSDKClient.query(技能包定义)
+    
+    SDK->>SDK: 理解工作流步骤
+    
+    loop 步骤执行
+        SDK->>Tools: 执行步骤（调用自定义工具）
+        Tools-->>SDK: 步骤结果
+        SDK-->>Agent: 步骤完成消息
+        Agent-->>API: 流式返回进度
+        API-->>Frontend: WebSocket 消息
+        Frontend-->>User: 显示步骤执行状态
+    end
+    
+    SDK-->>Agent: 工作流完成
+    Agent->>DB: 保存 Session
+    Agent-->>API: 最终结果
+    API-->>Frontend: 完成消息
+    Frontend-->>User: 显示完整结果
+```
+
 ### 3.3 核心组件职责
 
 | 组件 | 职责 | 开发方 |
@@ -267,6 +349,7 @@ sequenceDiagram
 | 用户管理 | 用户 CRUD、认证 | 自研 |
 | Session 管理 | Session 元数据、内容存储 | 自研 |
 | Agent 管理 | Agent 创建、加载用户配置 | 自研 |
+| 技能包管理 | 技能包创建、解析、执行调度 | 自研 |
 | Claude Agent SDK | Agent 核心、工具执行 | Anthropic |
 | Claude Code CLI | QueryEngine、压缩、缓存 | Anthropic |
 
@@ -756,11 +839,15 @@ MySQL 更新 token 统计
 | API | 方法 | 说明 |
 |------|------|------|
 | `/api/skills` | GET | 获取用户所有技能包 |
-| `/api/skills` | POST | 创建新技能包 |
-| `/api/skills/{name}` | GET | 获取技能包详情（SKILL.md 内容） |
-| `/api/skills/{name}` | PUT | 更新技能包内容 |
+| `/api/skills` | POST | 创建新技能包（对话生成后确认保存） |
+| `/api/skills/{name}` | GET | 获取技能包详情（步骤列表） |
+| `/api/skills/{name}` | PUT | 更新技能包（对话修改后确认保存） |
 | `/api/skills/{name}` | DELETE | 删除技能包 |
 | `/api/skills/{name}/execute` | POST | 执行技能包（在指定 Session 中） |
+
+**技能包创建/修改流程：**
+- 用户在聊天中描述需求 → Agent 生成技能包定义 → 用户确认 → 调用 API 保存
+- 无需手动编写 SKILL.md，系统自动生成
 
 ---
 
@@ -1383,37 +1470,72 @@ sequenceDiagram
 
 ### 10.6 技能包管理流程
 
-**创建技能包：**
+**创建技能包（对话生成方式）：**
 
 ```mermaid
 sequenceDiagram
     participant User as 用户
     participant Frontend as 前端
     participant API as API
+    participant Agent as Agent引擎
+    participant SDK as Claude SDK
     participant DB as MySQL
     participant FS as 文件系统
 
-    User->>Frontend: 打开技能包设置页面
-    User->>Frontend: 点击"创建技能包"
+    User->>Frontend: 描述需求："帮我创建一个台风响应流程..."
+    Frontend->>API: WebSocket 发送消息
+    API->>Agent: 启动 Agent
+    Agent->>SDK: 发送用户需求
     
-    Frontend->>Frontend: 显示 SKILL.md 编辑器
+    SDK->>SDK: 分析需求，提取流程步骤
+    SDK-->>Agent: 生成技能包定义（名称、描述、步骤）
     
-    User->>Frontend: 编辑技能包内容
-    User->>Frontend: 点击"保存"
+    Agent-->>API: 流式返回技能包定义
+    API-->>Frontend: WebSocket 消息
+    Frontend-->>User: 显示生成的技能包内容
     
-    Frontend->>API: POST /api/skills
-    API->>DB: INSERT user_skills (skill_name, description...)
-    API->>FS: 创建目录 .claude/skills/{user_id}/{skill_name}/
-    API->>FS: 写入 SKILL.md 文件
+    User->>Frontend: 确认保存（或修改名称/步骤后确认）
+    Frontend->>API: POST /api/skills/confirm {skill_name, steps}
     
-    API-->>Frontend: 创建成功
-    Frontend-->>User: 显示成功提示
+    API->>API: 根据 steps 自动生成 SKILL.md 内容
+    API->>DB: INSERT user_skills (元数据)
+    API->>FS: 创建 .claude/skills/{user_id}/{skill_name}/SKILL.md
+    
+    API-->>Frontend: 保存成功
+    Frontend-->>User: 提示"技能包已创建，可使用 /{skill_name} 调用"
+```
+
+**修改技能包：**
+
+```
+用户：修改"台风积水检测"技能包，把步骤3改成先检查算法再检查设备
+
+Agent：好的，我帮你修改步骤顺序：
+
+原步骤：
+1. 获取台风路径
+2. 匹配设备
+3. 获取算法
+4. 下发任务
+
+修改后：
+1. 获取台风路径
+2. 获取可用算法
+3. 检查积水算法是否存在
+4. 匹配受影响的设备
+5. 下发积水任务
+
+请确认是否保存修改？
+
+用户：确认
+
+Agent：已更新技能包 "台风积水检测"。
 ```
 
 **执行技能包：**
 
 ```
-用户在聊天页面输入：/typhoon-weather-workflow
+用户在聊天页面输入：/台风积水检测
 
 系统处理：
 1. 解析输入，识别技能包调用
@@ -1426,53 +1548,81 @@ sequenceDiagram
 
 ### 10.7 前端技能包设置页面
 
+**技能包列表页面：**
+
 ```
 +--------------------------------------------------+
 |  技能包管理                                       |
 +--------------------------------------------------+
 |                                                  |
+|  提示：在聊天页面输入需求即可创建技能包             |
+|  例如："帮我创建一个台风响应流程..."               |
+|                                                  |
 |  我的技能包：                                     |
 |  +--------------------------------------------+  |
 |  | 名称 | 描述 | 创建时间 | 操作             |  |
 |  +--------------------------------------------+  |
-|  | 台风天气工作流 | 台风响应流程... | 2025-05-13 | [编辑] [删除] |  |
-|  | 数据分析流程 | 数据分析... | 2025-05-10 | [编辑] [删除] |  |
+|  | 台风积水检测 | 台风响应流程... | 2025-05-13 | [查看] [删除] |  |
+|  | 数据分析流程 | 数据分析... | 2025-05-10 | [查看] [删除] |  |
 |  +--------------------------------------------+  |
 |                                                  |
-|  [+ 创建新技能包]                                 |
 +--------------------------------------------------+
 ```
 
-**技能包编辑页面：**
+**技能包详情页面（查看生成的 SKILL.md）：**
 
 ```
 +--------------------------------------------------+
-|  编辑技能包：台风天气工作流                        |
+|  技能包详情：台风积水检测                          |
 +--------------------------------------------------+
 |                                                  |
 |  基本信息：                                       |
-|  名称：[typhoon-weather-workflow    ]            |
-|  描述：[台风天气响应工作流           ]            |
+|  名称：台风积水检测                               |
+|  描述：台风天气响应工作流 - 检测台风影响区域并下发任务 |
+|  创建时间：2025-05-13                             |
 |                                                  |
-|  SKILL.md 内容：                                  |
+|  工作流步骤：                                     |
 |  +--------------------------------------------+  |
-|  | ---                                        |  |
-|  | name: typhoon-weather-workflow             |  |
-|  | description: Use when handling typhoon...  |  |
-|  | ---                                        |  |
+|  | 步骤1: 获取台风路径坐标                     |  |
+|  |   工具: typhoon_china_today_path()         |  |
 |  |                                            |  |
-|  | # 台风天气工作流                            |  |
+|  | 步骤2: 获取可用算法列表                     |  |
+|  |   工具: applet_list()                      |  |
 |  |                                            |  |
-|  | ## 概述                                    |  |
-|  | 该技能自动化完整的台风天气响应...            |  |
+|  | 步骤3: 检查积水算法是否存在                 |  |
+|  |   判断: "积水" 是否在步骤2结果中            |  |
 |  |                                            |  |
-|  | ## 核心工作流                              |  |
-|  | 1. 获取台风路径坐标                        |  |
-|  | 2. 匹配受影响的设备                        |  |
-|  | ...                                        |  |
+|  | 步骤4: 匹配台风区域内的设备                 |  |
+|  |   工具: device_serial_match()              |  |
+|  |                                            |  |
+|  | 步骤5: 下发积水检测任务                     |  |
+|  |   工具: dispatch_applet_task()             |  |
 |  +--------------------------------------------+  |
 |                                                  |
-|  [保存]  [取消]                                   |
+|  使用方式：在聊天中输入 /台风积水检测              |
+|                                                  |
+|  提示：如需修改，在聊天中描述修改需求即可           |
+|  例如："修改台风积水检测，把步骤3改成..."           |
+|                                                  |
+|  [关闭]                                           |
++--------------------------------------------------+
+```
+
+**聊天页面技能包快捷入口：**
+
+```
++--------------------------------------------------+
+|  聊天输入框                                       |
++--------------------------------------------------+
+|                                                  |
+|  [/] 技能包快捷入口                               |
+|  ┌────────────────────────────────────────────┐  |
+|  │ 台风积水检测                                │  |
+|  │ 数据分析流程                                │  |
+|  │ [创建新技能包...]                           │  |
+|  └────────────────────────────────────────────┘  |
+|                                                  |
+|  输入框: [请输入消息或输入 / 调用技能包     ] [发送] |
 +--------------------------------------------------+
 ```
 
