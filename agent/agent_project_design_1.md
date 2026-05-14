@@ -2028,13 +2028,13 @@ agent_platform/
 
 **TiDB 数据表：**
 
-| 表名 | 说明 |
-|------|------|
-| users | 用户表（含基本设置） |
-| sessions | Session 元数据表 |
-| user_tool_permissions | 用户工具权限表 |
-| user_skills | 用户技能包元数据表 |
-| system_config | 系统默认配置表 |
+| 表名 | 说明 | 主要用途 |
+|------|------|----------|
+| users | 用户表 | 用户基本信息、个人配置 |
+| sessions | Session 元数据表 | 对话历史列表、统计 |
+| user_tool_permissions | 用户工具权限表 | 工具启用/禁用、确认配置 |
+| user_skills | 用户技能包元数据表 | 技能包管理 |
+| system_config | 系统默认配置表 | 系统级默认值 |
 
 **Redis 存储：**
 
@@ -2042,7 +2042,67 @@ agent_platform/
 |----------|------|----------|
 | session:{session_id} | Session 消息内容（messages数组） | 7 天 |
 
-### 12.2 Session 存储架构
+### 12.2 数据库 ER 图
+
+```mermaid
+erDiagram
+    USERS["users"] {
+        VARCHAR(36) id PK "用户唯一标识"
+        VARCHAR(50) username UK "用户名（唯一）"
+        VARCHAR(100) email UK "邮箱（唯一）"
+        VARCHAR(255) password_hash "密码哈希"
+        VARCHAR(50) default_model "默认模型"
+        JSON mcp_servers "MCP Server配置"
+        JSON agent_options "Agent选项"
+        TIMESTAMP created_at "创建时间"
+        TIMESTAMP updated_at "更新时间"
+    }
+    
+    SESSIONS["sessions"] {
+        VARCHAR(36) id PK "Session ID"
+        VARCHAR(36) user_id FK "所属用户"
+        VARCHAR(200) title "对话标题"
+        VARCHAR(50) model "使用模型"
+        VARCHAR(20) status "状态"
+        INT total_input_tokens "输入tokens"
+        INT total_output_tokens "输出tokens"
+        DECIMAL total_cost "成本"
+        TIMESTAMP created_at "创建时间"
+        TIMESTAMP updated_at "更新时间"
+    }
+    
+    USER_TOOL_PERMISSIONS["user_tool_permissions"] {
+        INT id PK "主键"
+        VARCHAR(36) user_id FK "用户ID"
+        VARCHAR(50) tool_name "工具名称"
+        BOOLEAN enabled "是否启用"
+        BOOLEAN requires_confirmation "是否需确认"
+        TIMESTAMP created_at "创建时间"
+        TIMESTAMP updated_at "更新时间"
+    }
+    
+    USER_SKILLS["user_skills"] {
+        INT id PK "主键"
+        VARCHAR(36) user_id FK "用户ID"
+        VARCHAR(100) skill_name UK "技能包名称"
+        VARCHAR(500) description "描述"
+        VARCHAR(255) file_path "文件路径"
+        TIMESTAMP created_at "创建时间"
+        TIMESTAMP updated_at "更新时间"
+    }
+    
+    SYSTEM_CONFIG["system_config"] {
+        VARCHAR(50) key PK "配置项名称"
+        JSON value "配置值"
+        TIMESTAMP updated_at "更新时间"
+    }
+    
+    USERS ||--o{ SESSIONS : "拥有多个Session"
+    USERS ||--o{ USER_TOOL_PERMISSIONS : "拥有多个工具权限"
+    USERS ||--o{ USER_SKILLS : "拥有多个技能包"
+```
+
+### 12.3 Session 存储架构
 
 ```mermaid
 graph TB
@@ -2074,89 +2134,356 @@ graph TB
     style M1 fill:#bbf,stroke:#333
 ```
 
-**存储说明：**
+### 12.4 表结构详细设计
 
-| 数据类型 | 存储位置 | 用途 | 过期策略 |
-|----------|----------|------|----------|
-| Session 元数据 | TiDB sessions 表 | 列表查询、统计 | 永久保存 |
-| Session 消息内容 | Redis | Agent上下文、恢复对话 | 7天后自动过期 |
+---
 
-**关联方式：TiDB sessions.id = Redis key session:{id}**
+#### 12.4.1 users 表（用户表）
 
-### 12.3 数据表字段设计
+**用途：存储用户基本信息和个人配置**
 
-**用户表：**
+```mermaid
+graph TB
+    subgraph USERS_TB["users 表结构"]
+        F1["id<br/>VARCHAR(36)<br/>PK<br/>───────────<br/>用户唯一标识<br/>UUID格式"]
+        F2["username<br/>VARCHAR(50)<br/>UK<br/>───────────<br/>用户名<br/>唯一，不允许重复"]
+        F3["email<br/>VARCHAR(100)<br/>UK<br/>───────────<br/>邮箱<br/>唯一，用于找回密码"]
+        F4["password_hash<br/>VARCHAR(255)<br/>───────────<br/>密码哈希<br/>bcrypt加密存储"]
+        F5["default_model<br/>VARCHAR(50)<br/>───────────<br/>默认模型<br/>可为空，使用系统默认"]
+        F6["mcp_servers<br/>JSON<br/>───────────<br/>MCP Server配置<br/>JSON数组格式"]
+        F7["agent_options<br/>JSON<br/>───────────<br/>Agent运行选项<br/>JSON对象格式"]
+        F8["created_at<br/>TIMESTAMP<br/>───────────<br/>创建时间<br/>注册时间"]
+        F9["updated_at<br/>TIMESTAMP<br/>───────────<br/>更新时间<br/>每次修改设置时更新"]
+    end
+```
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | VARCHAR(36) | UUID |
-| username | VARCHAR(50) | 用户名 |
-| email | VARCHAR(100) | 邮箱 |
-| password_hash | VARCHAR(255) | 密码哈希 |
-| default_model | VARCHAR(50) | 默认模型 |
-| mcp_servers | JSON | MCP Server 配置 |
-| agent_options | JSON | Agent 选项 |
-| created_at | TIMESTAMP | 创建时间 |
-| updated_at | TIMESTAMP | 更新时间 |
+**字段定义：**
 
-**用户工具权限表 (user_tool_permissions)：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INT AUTO_INCREMENT | 主键 |
-| user_id | VARCHAR(36) | 用户 ID（外键） |
-| tool_name | VARCHAR(50) | 工具名称 |
-| enabled | BOOLEAN | 是否启用 |
-| requires_confirmation | BOOLEAN | 是否需要确认 |
-| created_at | TIMESTAMP | 创建时间 |
-| updated_at | TIMESTAMP | 更新时间 |
-
-**索引：**
-- UNIQUE(user_id, tool_name) — 每用户每工具唯一
-- INDEX(user_id) — 查询用户所有权限
-
-**用户技能包表 (user_skills)：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INT AUTO_INCREMENT | 主键 |
-| user_id | VARCHAR(36) | 用户 ID（外键） |
-| skill_name | VARCHAR(100) | 技能包名称 |
-| description | VARCHAR(500) | 技能包描述 |
-| file_path | VARCHAR(255) | SKILL.md 文件路径 |
-| created_at | TIMESTAMP | 创建时间 |
-| updated_at | TIMESTAMP | 更新时间 |
+| 字段 | 类型 | 约束 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| id | VARCHAR(36) | PRIMARY KEY | - | UUID，用户唯一标识 |
+| username | VARCHAR(50) | UNIQUE, NOT NULL | - | 用户名，登录凭证 |
+| email | VARCHAR(100) | UNIQUE, NOT NULL | - | 邮箱，可用于找回密码 |
+| password_hash | VARCHAR(255) | NOT NULL | - | bcrypt加密后的密码 |
+| default_model | VARCHAR(50) | - | NULL | 默认模型，为空则用系统默认 |
+| mcp_servers | JSON | - | NULL | MCP Server配置数组 |
+| agent_options | JSON | - | NULL | Agent运行选项对象 |
+| created_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP ON UPDATE | 更新时间 |
 
 **索引：**
-- UNIQUE(user_id, skill_name) — 每用户每技能包唯一
-- INDEX(user_id) — 查询用户所有技能包
 
-**Session 表 (sessions)：**
+| 索引名 | 索引类型 | 字段 | 说明 |
+|--------|----------|------|------|
+| PRIMARY | 主键 | id | 主键索引 |
+| uk_username | 唯一索引 | username | 用户名唯一 |
+| uk_email | 唯一索引 | email | 邓箱唯一 |
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | VARCHAR(36) | Session ID（关联 Redis key） |
-| user_id | VARCHAR(36) | 用户 ID |
-| title | VARCHAR(200) | 标题（首条消息自动生成） |
-| model | VARCHAR(50) | 模型 |
-| status | VARCHAR(20) | 状态：active / deleted |
-| total_input_tokens | INT | 输入 tokens |
-| total_output_tokens | INT | 输出 tokens |
-| total_cost | DECIMAL(10,4) | 成本 |
-| created_at | TIMESTAMP | 创建时间 |
-| updated_at | TIMESTAMP | 更新时间 |
+**示例数据：**
 
-**说明：**
-- Redis 内容 7 天后自动过期，TiDB 元数据永久保存
-- 用户删除 Session 时，同时删除 TiDB 记录和 Redis 内容
+```json
+{
+    "id": "user-abc-123",
+    "username": "zhangsan",
+    "email": "zhangsan@example.com",
+    "password_hash": "$2b$12$...",
+    "default_model": "claude-sonnet-4-5",
+    "mcp_servers": [
+        {
+            "name": "weather-mcp",
+            "command": "node",
+            "args": ["weather-server.js"],
+            "env": {}
+        }
+    ],
+    "agent_options": {
+        "permission_mode": "bypassPermissions",
+        "max_tokens": 4096
+    },
+    "created_at": "2025-05-10 10:30:00",
+    "updated_at": "2025-05-14 15:20:00"
+}
+```
 
-**系统配置表 (system_config)：**
+---
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| key | VARCHAR(50) | 配置项名称 |
-| value | JSON | 配置值 |
-| updated_at | TIMESTAMP | 更新时间 |
+#### 12.4.2 sessions 表（Session 元数据表）
+
+**用途：存储对话元数据，用于历史列表和统计**
+
+```mermaid
+graph TB
+    subgraph SESSIONS_TB["sessions 表结构"]
+        F1["id<br/>VARCHAR(36)<br/>PK<br/>───────────<br/>Session唯一标识<br/>关联Redis key"]
+        F2["user_id<br/>VARCHAR(36)<br/>FK<br/>───────────<br/>所属用户<br/>关联users.id"]
+        F3["title<br/>VARCHAR(200)<br/>───────────<br/>对话标题<br/>首条消息自动生成"]
+        F4["model<br/>VARCHAR(50)<br/>───────────<br/>使用的模型<br/>该对话使用的模型"]
+        F5["status<br/>VARCHAR(20)<br/>───────────<br/>状态<br/>active / deleted"]
+        F6["total_input_tokens<br/>INT<br/>───────────<br/>输入tokens统计<br/>累计值"]
+        F7["total_output_tokens<br/>INT<br/>───────────<br/>输出tokens统计<br/>累计值"]
+        F8["total_cost<br/>DECIMAL(10,4)<br/>───────────<br/>成本统计<br/>美元"]
+        F9["created_at<br/>TIMESTAMP<br/>───────────<br/>创建时间"]
+        F10["updated_at<br/>TIMESTAMP<br/>───────────<br/>最后活跃时间"]
+    end
+```
+
+**字段定义：**
+
+| 字段 | 类型 | 约束 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| id | VARCHAR(36) | PRIMARY KEY | - | Session ID，关联 Redis session:{id} |
+| user_id | VARCHAR(36) | NOT NULL, FOREIGN KEY | - | 所属用户，关联 users.id |
+| title | VARCHAR(200) | - | NULL | 对话标题，首条消息后自动生成 |
+| model | VARCHAR(50) | NOT NULL | - | 该对话使用的模型 |
+| status | VARCHAR(20) | NOT NULL | 'active' | 状态：active / deleted |
+| total_input_tokens | INT | - | 0 | 输入 tokens 累计 |
+| total_output_tokens | INT | - | 0 | 输出 tokens 累计 |
+| total_cost | DECIMAL(10,4) | - | 0.0000 | 成本累计（美元） |
+| created_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP ON UPDATE | 最后活跃时间 |
+
+**索引：**
+
+| 索引名 | 索引类型 | 字段 | 说明 |
+|--------|----------|------|------|
+| PRIMARY | 主键 | id | 主键索引 |
+| idx_user_id | 普通索引 | user_id | 查询用户的Session列表 |
+| idx_user_created | 复合索引 | user_id, created_at | 按时间排序查询用户历史 |
+| idx_status | 普通索引 | status | 状态过滤 |
+
+**示例数据：**
+
+```json
+{
+    "id": "session-def-456",
+    "user_id": "user-abc-123",
+    "title": "研究React组件设计",
+    "model": "claude-sonnet-4-5",
+    "status": "active",
+    "total_input_tokens": 2500,
+    "total_output_tokens": 1800,
+    "total_cost": 0.0850,
+    "created_at": "2025-05-12 09:00:00",
+    "updated_at": "2025-05-14 16:30:00"
+}
+```
+
+---
+
+#### 12.4.3 user_tool_permissions 表（用户工具权限表）
+
+**用途：存储用户对各工具的权限配置**
+
+```mermaid
+graph TB
+    subgraph TOOL_TB["user_tool_permissions 表结构"]
+        F1["id<br/>INT<br/>PK AUTO_INCREMENT<br/>───────────<br/>主键<br/>自增"]
+        F2["user_id<br/>VARCHAR(36)<br/>FK<br/>───────────<br/>用户ID<br/>关联users.id"]
+        F3["tool_name<br/>VARCHAR(50)<br/>───────────<br/>工具名称<br/>Bash/Read/Write..."]
+        F4["enabled<br/>BOOLEAN<br/>───────────<br/>是否启用<br/>true/false"]
+        F5["requires_confirmation<br/>BOOLEAN<br/>───────────<br/>是否需要确认<br/>true/false"]
+        F6["created_at<br/>TIMESTAMP<br/>───────────<br/>创建时间<br/>注册时初始化"]
+        F7["updated_at<br/>TIMESTAMP<br/>───────────<br/>更新时间<br/>修改权限时更新"]
+    end
+    
+    subgraph UK["唯一约束"]
+        UK1["UNIQUE(user_id, tool_name)<br/>───────────<br/>每用户每工具<br/>只有一条记录"]
+    end
+```
+
+**字段定义：**
+
+| 字段 | 类型 | 约束 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| id | INT | PRIMARY KEY AUTO_INCREMENT | - | 主键，自增 |
+| user_id | VARCHAR(36) | NOT NULL, FOREIGN KEY | - | 用户ID，关联 users.id |
+| tool_name | VARCHAR(50) | NOT NULL | - | 工具名称，如 Bash、Read、Write |
+| enabled | BOOLEAN | NOT NULL | true | 是否启用此工具 |
+| requires_confirmation | BOOLEAN | NOT NULL | false | 执行前是否需要用户确认 |
+| created_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP ON UPDATE | 更新时间 |
+
+**索引：**
+
+| 索引名 | 索引类型 | 字段 | 说明 |
+|--------|----------|------|------|
+| PRIMARY | 主键 | id | 主键索引 |
+| uk_user_tool | 唯一索引 | user_id, tool_name | 每用户每工具唯一 |
+| idx_user_id | 普通索引 | user_id | 查询用户所有权限 |
+
+**示例数据：**
+
+| id | user_id | tool_name | enabled | requires_confirmation |
+|----|---------|-----------|---------|----------------------|
+| 1 | user-abc-123 | Bash | true | true |
+| 2 | user-abc-123 | Read | true | false |
+| 3 | user-abc-123 | Write | true | true |
+| 4 | user-abc-123 | Edit | true | true |
+| 5 | user-abc-123 | WebSearch | true | false |
+| 6 | user-abc-123 | WebFetch | true | false |
+| 7 | user-xyz-789 | Bash | false | false |
+| 8 | user-xyz-789 | Read | true | false |
+
+---
+
+#### 12.4.4 user_skills 表（用户技能包元数据表）
+
+**用途：存储用户技能包的元数据**
+
+```mermaid
+graph TB
+    subgraph SKILLS_TB["user_skills 表结构"]
+        F1["id<br/>INT<br/>PK AUTO_INCREMENT<br/>───────────<br/>主键<br/>自增"]
+        F2["user_id<br/>VARCHAR(36)<br/>FK<br/>───────────<br/>用户ID<br/>关联users.id"]
+        F3["skill_name<br/>VARCHAR(100)<br/>───────────<br/>技能包名称<br/>用户自定义"]
+        F4["description<br/>VARCHAR(500)<br/>───────────<br/>技能包描述<br/>用途说明"]
+        F5["file_path<br/>VARCHAR(255)<br/>───────────<br/>SKILL.md路径<br/>.claude/skills/{user}/{name}/"]
+        F6["created_at<br/>TIMESTAMP<br/>───────────<br/>创建时间"]
+        F7["updated_at<br/>TIMESTAMP<br/>───────────<br/>更新时间"]
+    end
+    
+    subgraph UK_SKILL["唯一约束"]
+        UK2["UNIQUE(user_id, skill_name)<br/>───────────<br/>每用户每技能包<br/>名称唯一"]
+    end
+```
+
+**字段定义：**
+
+| 字段 | 类型 | 约束 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| id | INT | PRIMARY KEY AUTO_INCREMENT | - | 主键，自增 |
+| user_id | VARCHAR(36) | NOT NULL, FOREIGN KEY | - | 用户ID，关联 users.id |
+| skill_name | VARCHAR(100) | NOT NULL | - | 技能包名称，用户自定义 |
+| description | VARCHAR(500) | - | NULL | 技能包描述 |
+| file_path | VARCHAR(255) | NOT NULL | - | SKILL.md 文件路径 |
+| created_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP ON UPDATE | 更新时间 |
+
+**索引：**
+
+| 索引名 | 索引类型 | 字段 | 说明 |
+|--------|----------|------|------|
+| PRIMARY | 主键 | id | 主键索引 |
+| uk_user_skill | 唯一索引 | user_id, skill_name | 每用户每技能包名称唯一 |
+| idx_user_id | 普通索引 | user_id | 查询用户所有技能包 |
+
+**示例数据：**
+
+| id | user_id | skill_name | description | file_path |
+|----|---------|------------|-------------|-----------|
+| 1 | user-abc-123 | 台风积水检测 | 台风天气响应工作流 | .claude/skills/user-abc-123/台风积水检测/SKILL.md |
+| 2 | user-abc-123 | 数据分析流程 | 数据分析自动化流程 | .claude/skills/user-abc-123/数据分析流程/SKILL.md |
+| 3 | user-xyz-789 | 报警处理 | 报警自动处理流程 | .claude/skills/user-xyz-789/报警处理/SKILL.md |
+
+---
+
+#### 12.4.5 system_config 表（系统配置表）
+
+**用途：存储系统级默认配置**
+
+```mermaid
+graph TB
+    subgraph CONFIG_TB["system_config 表结构"]
+        F1["key<br/>VARCHAR(50)<br/>PK<br/>───────────<br/>配置项名称<br/>如default_model"]
+        F2["value<br/>JSON<br/>───────────<br/>配置值<br/>JSON格式存储"]
+        F3["updated_at<br/>TIMESTAMP<br/>───────────<br/>更新时间"]
+    end
+```
+
+**字段定义：**
+
+| 字段 | 类型 | 约束 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| key | VARCHAR(50) | PRIMARY KEY | - | 配置项名称 |
+| value | JSON | NOT NULL | - | 配置值，JSON格式 |
+| updated_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP ON UPDATE | 更新时间 |
+
+**示例数据：**
+
+| key | value | 说明 |
+|-----|-------|------|
+| default_model | "claude-sonnet-4-5" | 系统默认模型 |
+| available_models | ["claude-sonnet-4-5", "claude-opus-4-6", "claude-haiku-4-5"] | 可用模型列表 |
+| default_tools_config | {"Bash": {"enabled": true, "requires_confirmation": true}, "Read": {"enabled": true, "requires_confirmation": false}, ...} | 工具默认配置 |
+
+### 12.5 Redis 存储结构
+
+**Key 设计：**
+
+| Key 格式 | 说明 | Value 结构 | 过期时间 |
+|----------|------|------------|----------|
+| session:{session_id} | Session 消息内容 | JSON | 7 天 |
+
+**Value 结构：**
+
+```mermaid
+graph TB
+    subgraph REDIS_VALUE["Redis Value JSON结构"]
+        V1["session_id<br/>───────────<br/>与TiDB sessions.id相同<br/>用于关联"]
+        V2["messages<br/>───────────<br/>消息数组<br/>[{role, content}...]"]
+        V3["metadata<br/>───────────<br/>元数据<br/>{tokens, cost...}"]
+    end
+```
+
+**示例数据：**
+
+```json
+{
+    "session_id": "session-def-456",
+    "messages": [
+        {
+            "role": "user",
+            "content": "帮我写一个React组件"
+        },
+        {
+            "role": "assistant",
+            "content": "好的，这是一个简单的React组件示例..."
+        },
+        {
+            "role": "user",
+            "content": "再加一个props参数"
+        },
+        {
+            "role": "assistant",
+            "content": "已添加props参数..."
+        }
+    ],
+    "metadata": {
+        "input_tokens": 2500,
+        "output_tokens": 1800,
+        "last_updated": "2025-05-14T16:30:00Z"
+    }
+}
+```
+
+### 12.6 表关系总结
+
+```mermaid
+flowchart TB
+    subgraph RELATION["表关系"]
+        USERS["users<br/>用户表"]
+        SESSIONS["sessions<br/>Session元数据"]
+        TOOLS["user_tool_permissions<br/>工具权限"]
+        SKILLS["user_skills<br/>技能包"]
+        CONFIG["system_config<br/>系统配置"]
+    end
+    
+    USERS -->|"1:N<br/>user_id"| SESSIONS
+    USERS -->|"1:N<br/>user_id"| TOOLS
+    USERS -->|"1:N<br/>user_id"| SKILLS
+    CONFIG -.->|"初始化"| TOOLS
+    CONFIG -.->|"默认值"| USERS
+```
+
+**关系说明：**
+
+| 关系 | 说明 |
+|------|------|
+| users → sessions | 一对多：一个用户有多个 Session |
+| users → user_tool_permissions | 一对多：一个用户有多个工具权限记录 |
+| users → user_skills | 一对多：一个用户有多个技能包 |
+| system_config → user_tool_permissions | 初始化：新用户注册时，从系统配置初始化工具权限 |
+| system_config → users | 默认值：用户未设置模型时，使用系统默认模型 |
 
 ---
 
