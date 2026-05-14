@@ -454,212 +454,311 @@ sequenceDiagram
 
 **用"书"的比喻来理解：**
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     "聊天对话" 的两层信息                                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  类比：一本书                                                            │
-│                                                                         │
-│  ┌─────────────────────┐        ┌─────────────────────────────┐        │
-│  │  书的封面/目录       │        │  书的内容（正文）            │        │
-│  │  (DB Session)       │        │  (SDK Session)              │        │
-│  │                     │        │                             │        │
-│  │  - 书名 → 对话标题   │        │  - 第1章 → 第1条消息        │        │
-│  │  - 作者 → 用户      │        │  - 第2章 → 第2条消息        │        │
-│  │  - 页数 → token数   │        │  - 第3章 → 第3条消息        │        │
-│  │                     │        │  ...                        │        │
-│  │                     │        │                             │        │
-│  │  存在：MySQL         │        │  存在：SessionStore         │        │
-│  │                     │        │  (Redis/MySQL/文件)         │        │
-│  │                     │        │                             │        │
-│  │  用途：              │        │  用途：                      │        │
-│  │  - 快速找书          │        │  - 阅读内容                 │        │
-│  │  - 统计有多少书      │        │  - 继续阅读（恢复对话）     │        │
-│  │  - 不打开就能看      │        │  - Agent 需要内容才能回答  │        │
-│  │    基本信息          │        │                             │        │
-│  └─────────────────────┘        └─────────────────────────────┘        │
-│                                                                         │
-│  关联方式：书的 ID = 内容的 ID（同一个标识）                               │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph BOOK["一本书的两层信息"]
+        COVER["书的封面/目录<br/>MySQL Session<br/>───────────<br/>书名 → 对话标题<br/>作者 → 用户<br/>页数 → token数"]
+        CONTENT["书的内容<br/>Redis Session<br/>───────────<br/>第1章 → 第1条消息<br/>第2章 → 第2条消息<br/>..."]
+    end
+    
+    COVER ---|"同一本书ID"|--- CONTENT
+    
+    subgraph USE1["封面用途"]
+        U1["快速找书"]
+        U2["统计有多少书"]
+        U3["不打开就能看基本信息"]
+    end
+    
+    subgraph USE2["内容用途"]
+        U4["阅读内容"]
+        U5["继续阅读（恢复对话）"]
+        U6["Agent需要内容才能回答"]
+    end
+    
+    COVER --> USE1
+    CONTENT --> USE2
 ```
 
-### 5.2 SessionStore 的位置与实现
+**两种 Session 的关系：**
 
-**SessionStore 与 SDK 的关系：**
+| 类型 | 存储位置 | 存储内容 | 用途 |
+|------|----------|----------|------|
+| MySQL Session | MySQL sessions 表 | id, title, tokens, cost 等元数据 | 列表展示、统计、管理 |
+| Redis Session | Redis | messages（消息数组）+ metadata | Agent 对话上下文、会话恢复 |
 
+**关联方式：同一个 session_id**
+
+### 5.2 Session 存储架构
+
+```mermaid
+flowchart TB
+    subgraph USER["用户操作"]
+        A1["查看对话列表"]
+        A2["进入某个对话"]
+        A3["继续对话"]
+        A4["新建对话"]
+    end
+    
+    subgraph MYSQL["MySQL（元数据）"]
+        M1["sessions 表<br/>───────────<br/>id: abc-123<br/>title: 研究React<br/>tokens: 3500<br/>cost: 0.05"]
+    end
+    
+    subgraph REDIS["Redis（内容）"]
+        R1["Key: session:abc-123<br/>───────────<br/>messages: [消息数组]<br/>metadata: {tokens...}<br/>───────────<br/>过期时间: 7天"]
+    end
+    
+    subgraph SDK["Claude Agent SDK"]
+        S1["ClaudeSDKClient"]
+        S2["SessionStore 接口<br/>save() / load()"]
+    end
+    
+    A1 -->|"只查元数据"| M1
+    A2 -->|"查元数据"| M1
+    A2 -->|"加载内容"| R1
+    A3 -->|"读取历史"| R1
+    A3 -->|"Agent处理"| S1
+    A4 -->|"创建记录"| M1
+    
+    S1 -->|"使用"| S2
+    S2 -->|"存/取"| R1
+    S1 -->|"每轮对话后"| R1
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        SessionStore 的关系                               │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│   Claude Agent SDK                                                      │
-│   ┌─────────────────────────────────────────────────────┐              │
-│   │                                                     │              │
-│   │   SDK 提供：                                        │              │
-│   │   - SessionStore 接口定义（规定要实现哪些方法）      │              │
-│   │   - 调用 SessionStore 的时机                        │              │
-│   │                                                     │              │
-│   │   接口方法：                                        │              │
-│   │   ┌─────────────────────────────────────┐          │              │
-│   │   │  save(messages, metadata)           │          │              │
-│   │   │  load() → messages, metadata        │          │              │
-│   │   └─────────────────────────────────────┘          │              │
-│   │              ↑                                    │              │
-│   │              │ 我们自己实现                        │              │
-│   │              │                                    │              │
-│   │   我们实现：                                       │              │
-│   │   ┌─────────────────────────────────────┐          │              │
-│   │   │  MySQLSessionStore                  │          │              │
-│   │   │  - save(): 存到我们选择的位置       │          │              │
-│   │   │  - load(): 从我们选择的位置读       │          │              │
-│   │   └─────────────────────────────────────┘          │              │
-│   │                                                     │              │
-│   │   SDK 运行时自动调用：                              │              │
-│   │   - 每轮对话结束 → 调用 save()                     │              │
-│   │   - 启动 Agent → 调用 load()                      │              │
-│   │                                                     │              │
-│   └─────────────────────────────────────────────────────┘              │
-│                                                                         │
-│   我们传给 SDK：                                                         │
-│   ClaudeSDKClient(session_store=我们实现的SessionStore)                 │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+
+### 5.3 SessionStore 与 SDK 的关系
+
+```mermaid
+flowchart LR
+    subgraph SDK_PROVIDES["SDK 提供"]
+        SDK1["SessionStore 接口定义<br/>───────────<br/>save(messages, metadata)<br/>load() → messages, metadata"]
+        SDK2["自动调用时机<br/>───────────<br/>每轮对话结束 → save()<br/>启动 Agent → load()"]
+    end
+    
+    subgraph WE_IMPLEMENT["我们实现"]
+        WE1["RedisSessionStore<br/>───────────<br/>save() → 存到 Redis<br/>load() → 从 Redis 读"]
+        WE2["Redis 配置<br/>───────────<br/>Key: session:{id}<br/>过期时间: 7天"]
+    end
+    
+    subgraph SDK_RUNTIME["SDK 运行时"]
+        RT1["ClaudeSDKClient<br/>session_store=RedisSessionStore"]
+    end
+    
+    SDK1 -->|"接口规范"| WE1
+    WE1 -->|"注入"| RT1
+    SDK2 -->|"调用"| WE1
+    WE1 -->|"实际存取"| WE2
 ```
 
-### 5.3 SessionStore 存储位置选择
-
-| 存储位置 | 适合场景 | 性能 | 成本 |
-|----------|----------|------|------|
-| Redis | 活跃对话（正在进行） | 最快 | 高 |
-| MySQL | 持久化存储 | 中 | 低 |
-| 文件 | 大量历史对话 | 慢 | 最低 |
-
-**推荐：Redis（活跃） + MySQL/文件（历史）**
-
-### 5.4 Session 关联流程
+### 5.4 Session 完整生命周期
 
 ```mermaid
 sequenceDiagram
     participant User as 用户
-    participant API as API
-    participant DB as MySQL
-    participant Store as SessionStore
+    participant Frontend as 前端
+    participant API as FastAPI
+    participant MySQL as MySQL<br/>元数据
+    participant Redis as Redis<br/>内容
     participant SDK as Claude SDK
 
-    User->>API: 点击"新建对话"
-    API->>DB: INSERT sessions (user_id...)
-    DB-->>API: session_id = "abc-123"
-    
-    Note over API,Store: DB Session 创建完成，获得 session_id
+    %% 场景1：新建对话
+    rect rgb(200, 230, 200)
+        Note over User, MySQL: 场景1：新建对话
+        User->>Frontend: 点击"新建对话"
+        Frontend->>API: POST /api/sessions
+        API->>MySQL: INSERT sessions (user_id, title=null)
+        MySQL-->>API: session_id = "abc-123"
+        API-->>Frontend: {session_id: "abc-123"}
+        Frontend-->>User: 进入新对话页面
+    end
 
-    User->>API: 发送消息 (session_id="abc-123")
-    API->>DB: SELECT sessions WHERE id="abc-123"
-    DB-->>API: Session 元数据
-    
-    API->>API: 加载用户 settings 配置
-    
-    API->>Store: 创建 SessionStore("abc-123")
-    Note over Store: 用 DB session_id 作为 SessionStore 的标识
-    
-    API->>SDK: ClaudeSDKClient(session_store=Store, options=用户配置)
-    SDK->>Store: load() 加载历史消息
-    Store-->>SDK: messages=[] (新Session为空)
-    
-    SDK->>SDK: 执行对话
-    
-    SDK->>Store: save(messages) 保存
-    Note over Store: SDK 每轮对话后自动调用 save
-    
-    API->>DB: UPDATE sessions (tokens, cost)
+    %% 场景2：发送第一条消息
+    rect rgb(200, 200, 230)
+        Note over User, SDK: 场景2：发送第一条消息
+        User->>Frontend: 输入"帮我写React组件"
+        Frontend->>API: WebSocket 发送消息
+        API->>Redis: 创建 RedisSessionStore(session_id="abc-123")
+        API->>SDK: ClaudeSDKClient(session_store=RedisSessionStore)
+        SDK->>Redis: load() 加载历史
+        Redis-->>SDK: messages = [] (新对话为空)
+        SDK->>SDK: 执行对话
+        SDK-->>API: 流式返回回复
+        API-->>Frontend: 流式消息
+        Frontend-->>User: 显示回复
+        SDK->>Redis: save(messages) 自动保存
+        API->>MySQL: UPDATE sessions (tokens, cost, title)
+    end
+
+    %% 场景3：继续对话
+    rect rgb(230, 200, 200)
+        Note over User, SDK: 场景3：继续对话（第2天）
+        User->>Frontend: 再次发送消息
+        Frontend->>API: WebSocket 发送消息
+        API->>Redis: 创建 RedisSessionStore
+        SDK->>Redis: load()
+        Redis-->>SDK: messages = [之前的2条消息]
+        Note over SDK: Agent 看到历史上下文<br/>理解之前的 React 讨论
+        SDK->>SDK: 基于上下文回复
+        SDK-->>API: 流式返回
+        SDK->>Redis: save() 更新保存
+    end
+
+    %% 场景4：过期处理
+    rect rgb(240, 240, 200)
+        Note over User, Redis: 场景4：7天后过期
+        Redis->>Redis: Key 过期自动删除
+        Note over Redis: 消息内容丢失<br/>但 MySQL 元数据仍存在
+        User->>Frontend: 点击该对话
+        Frontend->>API: GET /api/sessions/abc-123
+        API->>MySQL: 查询元数据
+        MySQL-->>API: {id, title, tokens...}
+        API->>Redis: load() 加载内容
+        Redis-->>API: 空（已过期）
+        API-->>Frontend: 对话内容已过期，需新建
+        Frontend-->>User: 提示"对话已过期"
+    end
 ```
 
-### 5.5 Session 数据模型
+### 5.5 查看历史列表流程
 
-**MySQL Session 表（元数据）：**
+```mermaid
+flowchart TD
+    A["用户打开聊天页面"] --> B["请求 Session 列表"]
+    B --> C["API 查询 MySQL"]
+    C --> D["SELECT sessions<br/>WHERE user_id = ?"]
+    D --> E["返回元数据列表<br/>───────────<br/>id, title, tokens, cost<br/>created_at, updated_at"]
+    E --> F["前端展示列表<br/>───────────<br/>研究React - 昨天 - 3500 tokens<br/>写HTTP服务 - 3天前 - 1500 tokens"]
+    
+    style C fill:#f9f,stroke:#333
+    style D fill:#bbf,stroke:#333
+    style E fill:#bfb,stroke:#333
+    
+    Note1["备注：这一步只查 MySQL<br/>不访问 Redis<br/>不加载对话内容"]
+    
+    F -.-> Note1
+```
+
+### 5.6 进入对话并继续聊天流程
+
+```mermaid
+flowchart TD
+    subgraph STEP1["步骤1：进入对话"]
+        A1["用户点击某个对话"] --> A2["API 查询 MySQL 元数据"]
+        A2 --> A3["API 从 Redis 加载内容<br/>RedisSessionStore.load()"]
+        A3 --> A4["返回完整消息记录<br/>messages 数组"]
+        A4 --> A5["前端显示历史对话"]
+    end
+    
+    subgraph STEP2["步骤2：发送新消息"]
+        B1["用户输入新消息"] --> B2["创建 Agent<br/>注入 RedisSessionStore"]
+        B2 --> B3["SDK 调用 load()<br/>获取历史上下文"]
+        B3 --> B4["Agent 基于上下文生成回复"]
+        B4 --> B5["SDK 自动调用 save()<br/>保存到 Redis"]
+        B5 --> B6["更新 MySQL tokens/cost"]
+    end
+    
+    STEP1 --> STEP2
+    
+    style A3 fill:#f96,stroke:#333
+    style B3 fill:#f96,stroke:#333
+    style B5 fill:#f96,stroke:#333
+```
+
+### 5.7 Session 数据模型
+
+**MySQL sessions 表（元数据）：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | VARCHAR(36) | Session ID，关联 SessionStore |
+| id | VARCHAR(36) | Session ID，关联 Redis Key |
 | user_id | VARCHAR(36) | 所属用户 |
-| title | VARCHAR(200) | Session 标题 |
+| title | VARCHAR(200) | Session 标题（首条消息自动生成） |
 | model | VARCHAR(50) | 使用的模型 |
-| status | VARCHAR(20) | 状态：active, archived, deleted |
+| status | VARCHAR(20) | 状态：active, deleted |
 | total_input_tokens | INT | 输入 token 统计 |
 | total_output_tokens | INT | 输出 token 统计 |
 | total_cost | DECIMAL | 成本统计 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
 
-**SessionStore 存储内容：**
-
-| 内容 | 说明 |
-|------|------|
-| session_id | 与 MySQL sessions.id 相同（关联标识） |
-| messages | 对话消息列表（每条消息的完整内容） |
-| context | 对话上下文信息 |
-| metadata | token 统计、成本等 |
-
-### 5.6 实际使用场景
-
-**场景1：用户查看历史列表**
+**Redis 存储结构：**
 
 ```
-用户打开聊天页面
-    ↓
-系统查询 MySQL sessions 表
-    ↓
-返回对话列表（只返回元数据，不加载内容）
-    ↓
-用户看到：
-    1. 研究React - 昨天 - 2000 tokens
-    2. 写HTTP服务 - 3天前 - 1500 tokens
-    ...
+Key: session:{session_id}
+Value: JSON
+{
+    "session_id": "abc-123",
+    "messages": [
+        {"role": "user", "content": "帮我写React组件"},
+        {"role": "assistant", "content": "好的..."}
+    ],
+    "metadata": {
+        "input_tokens": 500,
+        "output_tokens": 300
+    }
+}
+过期时间: 7 天（可配置）
+```
+
+### 5.8 Session 过期策略
+
+```mermaid
+flowchart TD
+    subgraph ACTIVE["活跃对话"]
+        A1["用户正在使用"]
+        A2["Redis Key 存在"]
+        A3["可正常恢复对话"]
+    end
     
-（这一步不需要 SessionStore，只查 MySQL）
-```
-
-**场景2：用户进入某个对话**
-
-```
-用户点击"研究React"
-    ↓
-系统用 session_id="abc-123" 创建 SessionStore
-    ↓
-SessionStore.load() 加载消息内容
-    ↓
-用户看到完整对话记录（10轮对话）
+    subgraph EXPIRED["过期对话"]
+        E1["7天无活动"]
+        E2["Redis Key 自动删除"]
+        E3["MySQL 元数据仍存在"]
+    end
     
-（这一步需要 SessionStore 加载内容）
+    subgraph HANDLE["过期处理"]
+        H1["用户点击过期对话"]
+        H2["load() 返回空"]
+        H3["提示用户对话已过期"]
+        H4["用户选择新建对话"]
+    end
+    
+    ACTIVE -->|"7天后"| EXPIRED
+    EXPIRED -->|"用户访问"| HANDLE
+    
+    style E2 fill:#f66,stroke:#333
+    style H3 fill:#ff9,stroke:#333
 ```
 
-**场景3：用户继续对话**
+**过期策略说明：**
 
-```
-用户发送新消息："再写一个示例"
-    ↓
-Agent 用 SessionStore.load() 获取历史上下文
-    ↓
-Agent 看到之前的 React 讨论，理解上下文
-    ↓
-Agent 回复："好的，基于刚才讨论的特性..."
-    ↓
-SessionStore.save() 保存新消息
-    ↓
-MySQL 更新 token 统计
-```
+| 状态 | Redis | MySQL | 用户看到 |
+|------|-------|-------|----------|
+| 活跃（7天内） | 存在 | 存在 | 正常对话 |
+| 过期（7天后） | 已删除 | 存在 | 提示过期，需新建 |
+| 用户删除 | 删除 | 删除 | 从列表移除 |
 
-### 5.7 Session API 设计
+### 5.9 Session API 设计
 
 | API | 方法 | 说明 |
 |------|------|------|
-| `/api/sessions` | GET | 获取用户 Session 列表（只返回元数据） |
-| `/api/sessions` | POST | 创建新 Session |
-| `/api/sessions/{id}` | GET | 获取 Session 详情（含消息内容） |
-| `/api/sessions/{id}` | DELETE | 删除 Session |
-| `/api/sessions/{id}/title` | PATCH | 更新标题 |
-| `/api/sessions/{id}/archive` | PATCH | 归档 Session |
+| `/api/sessions` | GET | 获取用户 Session 列表（只返回 MySQL 元数据） |
+| `/api/sessions` | POST | 创建新 Session（写入 MySQL，Redis 自动创建） |
+| `/api/sessions/{id}` | GET | 获取 Session 详情（MySQL 元数据 + Redis 内容） |
+| `/api/sessions/{id}` | DELETE | 删除 Session（同时删除 MySQL 和 Redis） |
+| `/api/sessions/{id}/title` | PATCH | 更新标题（只更新 MySQL） |
+
+### 5.10 存储方案对比
+
+| 对比项 | 本方案<br/>MySQL + Redis | 全 MySQL 方案 | 全 Redis 方案 |
+|--------|--------------------------|---------------|---------------|
+| 元数据存储 | MySQL（持久） | MySQL | Redis |
+| 内容存储 | Redis（快） | MySQL | Redis |
+| 列表查询速度 | 快（只查 MySQL） | 中 | 快 |
+| 对话恢复速度 | 快（Redis） | 中 | 快 |
+| 长期保存 | 元数据可保存 | 可保存 | 不可靠 |
+| 成本 | 中 | 低 | 高（内存） |
+| 复杂度 | 中 | 低 | 低 |
+
+**本方案优势：元数据持久化 + 对话内容快速读写，过期后内容自动清理，节省内存。**
 
 ---
 
@@ -1730,7 +1829,9 @@ agent_platform/
 
 ## 12. 数据库设计（MySQL）
 
-### 12.1 数据表概览
+### 12.1 存储概览
+
+**MySQL 数据表：**
 
 | 表名 | 说明 |
 |------|------|
@@ -1740,30 +1841,52 @@ agent_platform/
 | user_skills | 用户技能包元数据表 |
 | system_config | 系统默认配置表 |
 
+**Redis 存储：**
+
+| Key 格式 | 说明 | 过期时间 |
+|----------|------|----------|
+| session:{session_id} | Session 消息内容（messages数组） | 7 天 |
+
 ### 12.2 Session 存储架构
 
+```mermaid
+graph TB
+    subgraph MYSQL["MySQL（持久化）"]
+        M1["sessions 表<br/>───────────<br/>Session 元数据<br/>id, title, tokens, cost<br/>created_at, updated_at"]
+    end
+    
+    subgraph REDIS["Redis（缓存）"]
+        R1["Key: session:{id}<br/>───────────<br/>Session 内容<br/>messages 数组<br/>metadata<br/>───────────<br/>过期时间: 7天"]
+    end
+    
+    subgraph USE1["元数据用途"]
+        U1["用户历史列表"]
+        U2["快速查询"]
+        U3["成本统计"]
+    end
+    
+    subgraph USE2["内容用途"]
+        U4["Agent 对话上下文"]
+        U5["会话恢复"]
+        U6["实时读写"]
+    end
+    
+    M1 -->|"session_id 关联"| R1
+    M1 --> USE1
+    R1 --> USE2
+    
+    style R1 fill:#f96,stroke:#333
+    style M1 fill:#bbf,stroke:#333
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Session 存储架构                              │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  数据类型           存储位置           用途                      │
-│  ─────────────────────────────────────────────────────────────  │
-│                                                                 │
-│  Session 元数据      MySQL              用户历史列表              │
-│  - id, title       sessions表         快速查询                  │
-│  - model                              成本统计                  │
-│  - token统计                                                   │
-│                                                                 │
-│  Session 消息内容    Redis + 文件       Agent 对话上下文          │
-│  - messages        (SessionStore)      会话恢复                  │
-│  - context                            消息持久化                │
-│                                                                 │
-│  关联方式:                                                       │
-│  MySQL sessions.id = SessionStore.session_id                    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+
+**存储说明：**
+
+| 数据类型 | 存储位置 | 用途 | 过期策略 |
+|----------|----------|------|----------|
+| Session 元数据 | MySQL sessions 表 | 列表查询、统计 | 永久保存 |
+| Session 消息内容 | Redis | Agent上下文、恢复对话 | 7天后自动过期 |
+
+**关联方式：MySQL sessions.id = Redis key session:{id}**
 
 ### 12.3 数据表字段设计
 
@@ -1817,16 +1940,20 @@ agent_platform/
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | VARCHAR(36) | Session ID（关联 SDK） |
+| id | VARCHAR(36) | Session ID（关联 Redis key） |
 | user_id | VARCHAR(36) | 用户 ID |
-| title | VARCHAR(200) | 标题 |
+| title | VARCHAR(200) | 标题（首条消息自动生成） |
 | model | VARCHAR(50) | 模型 |
-| status | VARCHAR(20) | 状态 |
+| status | VARCHAR(20) | 状态：active / deleted |
 | total_input_tokens | INT | 输入 tokens |
 | total_output_tokens | INT | 输出 tokens |
 | total_cost | DECIMAL(10,4) | 成本 |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
+
+**说明：**
+- Redis 内容 7 天后自动过期，MySQL 元数据永久保存
+- 用户删除 Session 时，同时删除 MySQL 记录和 Redis 内容
 
 **系统配置表 (system_config)：**
 

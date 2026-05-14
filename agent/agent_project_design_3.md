@@ -221,124 +221,192 @@ flowchart TB
 
 ### 3.2 核心数据流
 
-**数据流一：普通聊天流程**
+**系统整体数据流（前端、后端、Agent SDK、数据库四角色交互）**
 
 ```mermaid
 sequenceDiagram
-    participant User as 用户
-    participant Frontend as 前端
-    participant API as FastAPI
-    participant SessionMgr as Session管理
-    participant Agent as Agent引擎
-    participant SDK as Claude SDK
+    participant FE as 前端
+    participant BE as 后端
+    participant SDK as Agent SDK
     participant DB as 数据库
 
-    User->>Frontend: 打开聊天页面
-    Frontend->>API: GET /api/sessions (获取历史)
-    API->>SessionMgr: 查询用户 Sessions
-    SessionMgr->>DB: 查询数据库
-    DB-->>SessionMgr: Session 列表
-    SessionMgr-->>API: Session 列表
-    API-->>Frontend: JSON Response
-    Frontend-->>User: 显示 Session 历史
-
-    User->>Frontend: 发送消息
-    Frontend->>API: WebSocket 连接
-    Frontend->>API: 发送消息 (WS)
-    API->>SessionMgr: 创建/恢复 Session
-    API->>Agent: 启动 Agent（加载用户配置）
-    Agent->>SDK: ClaudeSDKClient.query()
-    
-    loop 流式响应
-        SDK-->>Agent: Message 流
-        Agent-->>API: SSE/WS 流
-        API-->>Frontend: 流式消息
-        Frontend-->>User: 实时显示
+    %% ===== 注册流程 =====
+    rect rgb(240, 248, 255)
+        Note over FE, DB: 【注册流程】
+        FE->>BE: POST /api/auth/register {username, email, password}
+        BE->>DB: INSERT users (用户基本信息)
+        BE->>DB: INSERT user_tool_permissions (默认工具权限)
+        DB-->>BE: 成功
+        BE->>BE: 生成 JWT Token
+        BE-->>FE: {token, user_info}
+        FE->>FE: 存储 Token，跳转聊天页面
     end
-    
-    Agent->>SessionMgr: 保存 Session
-    SessionMgr->>DB: 持久化
-```
 
-**数据流二：技能包创建流程（对话生成）**
-
-```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant Frontend as 前端
-    participant API as FastAPI
-    participant Agent as Agent引擎
-    participant SDK as Claude SDK
-    participant DB as MySQL
-    participant FS as 文件系统
-
-    User->>Frontend: 描述需求："帮我创建一个台风响应流程..."
-    Frontend->>API: WebSocket 发送消息
-    API->>Agent: 启动 Agent
-    Agent->>SDK: 发送用户需求
-    
-    SDK->>SDK: 分析需求，提取流程步骤
-    SDK-->>Agent: 生成技能包定义
-    
-    Agent-->>API: 展示生成的技能包内容
-    API-->>Frontend: 流式返回
-    Frontend-->>User: 显示技能包定义（可修改）
-    
-    User->>Frontend: 确认保存（或修改后保存）
-    Frontend->>API: POST /api/skills/confirm
-    
-    API->>DB: INSERT user_skills (元数据)
-    API->>FS: 创建 .claude/skills/{user_id}/{skill_name}/SKILL.md
-    
-    API-->>Frontend: 保存成功
-    Frontend-->>User: 提示"技能包已创建，可使用 /技能包名称 调用"
-```
-
-**数据流三：技能包执行流程**
-
-```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant Frontend as 前端
-    participant API as FastAPI
-    participant SkillMgr as 技能包管理
-    participant Agent as Agent引擎
-    participant SDK as Claude SDK
-    participant Tools as 自定义工具
-    participant DB as MySQL
-    participant FS as 文件系统
-
-    User->>Frontend: 输入 /台风积水检测
-    Frontend->>API: WebSocket 发送消息
-    
-    API->>SkillMgr: 解析技能包调用
-    SkillMgr->>DB: 查询 user_skills 表
-    DB-->>SkillMgr: 技能包元数据
-    
-    SkillMgr->>FS: 读取 SKILL.md 文件
-    FS-->>SkillMgr: 技能包定义内容
-    SkillMgr-->>API: 技能包完整定义
-    
-    API->>Agent: 启动 Agent（prompt=技能包内容）
-    Agent->>SDK: ClaudeSDKClient.query(技能包定义)
-    
-    SDK->>SDK: 理解工作流步骤
-    
-    loop 步骤执行
-        SDK->>Tools: 执行步骤（调用自定义工具）
-        Tools-->>SDK: 步骤结果
-        SDK-->>Agent: 步骤完成消息
-        Agent-->>API: 流式返回进度
-        API-->>Frontend: WebSocket 消息
-        Frontend-->>User: 显示步骤执行状态
+    %% ===== 登录流程 =====
+    rect rgb(255, 250, 240)
+        Note over FE, DB: 【登录流程】
+        FE->>BE: POST /api/auth/login {username, password}
+        BE->>DB: SELECT users WHERE username=?
+        DB-->>BE: 用户信息 + password_hash
+        BE->>BE: bcrypt 验证密码
+        BE->>BE: 生成 JWT Token
+        BE->>DB: SELECT user_tool_permissions WHERE user_id=?
+        DB-->>BE: 用户工具权限列表
+        BE-->>FE: {token, user_info, settings}
+        FE->>FE: 存储 Token，跳转聊天页面
     end
-    
-    SDK-->>Agent: 工作流完成
-    Agent->>DB: 保存 Session
-    Agent-->>API: 最终结果
-    API-->>Frontend: 完成消息
-    Frontend-->>User: 显示完整结果
+
+    %% ===== 初始化：获取 Session 列表 =====
+    rect rgb(240, 255, 240)
+        Note over FE, DB: 【获取 Session 列表】
+        FE->>BE: GET /api/sessions (带 Token)
+        BE->>BE: 验证 Token，获取 user_id
+        BE->>DB: SELECT sessions WHERE user_id=? ORDER BY updated_at DESC
+        DB-->>BE: Session 元数据列表
+        BE-->>FE: Session 列表 JSON
+        FE->>FE: 渲染 Session 历史侧边栏
+    end
+
+    %% ===== 聊天流程 =====
+    rect rgb(255, 240, 245)
+        Note over FE, DB: 【聊天流程】
+        
+        FE->>BE: WebSocket 连接 /api/ws/{session_id}
+        BE->>BE: 验证 Token，验证 session 归属
+        
+        FE->>BE: 发送消息 {content}
+        
+        BE->>DB: SELECT sessions WHERE id=? (获取 Session 元数据)
+        DB-->>BE: Session 信息
+        
+        BE->>DB: SELECT users WHERE id=? (获取用户配置)
+        DB-->>BE: 用户配置
+        
+        BE->>DB: SELECT user_tool_permissions WHERE user_id=? (获取工具权限)
+        DB-->>BE: 工具权限配置
+        
+        BE->>BE: 创建 SessionStore (session_id)
+        BE->>SDK: ClaudeSDKClient(session_store, options=用户配置)
+        SDK->>DB: SessionStore.load() 加载历史消息
+        DB-->>SDK: 历史消息列表
+        
+        SDK->>SDK: 执行对话
+        
+        loop 工具调用（如有）
+            SDK->>BE: PreToolUse Hook 触发
+            BE->>DB: 检查 user_tool_permissions
+            DB-->>BE: {enabled, requires_confirmation}
+            alt 工具已启用
+                BE-->>SDK: allow
+                alt 需要确认
+                    BE-->>FE: 弹出确认框
+                    FE->>BE: 用户确认允许
+                    BE->>SDK: 执行工具
+                else 不需要确认
+                    BE->>SDK: 直接执行工具
+                end
+            else 工具已禁用
+                BE-->>SDK: deny
+                SDK-->>FE: 提示"工具已禁用"
+            end
+        end
+        
+        loop 流式响应
+            SDK-->>BE: Message 流
+            BE-->>FE: WebSocket 流式消息
+            FE->>FE: 实时渲染消息
+        end
+        
+        SDK->>DB: SessionStore.save() 保存消息
+        BE->>DB: UPDATE sessions (tokens, cost)
+        DB-->>BE: 成功
+        BE-->>FE: 消息完成
+    end
+
+    %% ===== 用户设置流程 =====
+    rect rgb(230, 230, 250)
+        Note over FE, DB: 【用户设置流程】
+        
+        FE->>BE: GET /api/settings
+        BE->>DB: SELECT users + user_tool_permissions WHERE user_id=?
+        DB-->>BE: 用户全部配置
+        BE-->>FE: 配置数据
+        
+        FE->>FE: 渲染设置页面
+        
+        FE->>BE: PUT /api/settings/model {model: "claude-opus-4-6"}
+        BE->>DB: UPDATE users SET default_model=?
+        DB-->>BE: 成功
+        BE-->>FE: 更新成功
+        
+        FE->>BE: PUT /api/settings/tools [{tool_name, enabled, requires_confirmation}]
+        BE->>DB: UPDATE user_tool_permissions (批量)
+        DB-->>BE: 成功
+        BE-->>FE: 更新成功
+    end
+
+    %% ===== 技能包创建流程 =====
+    rect rgb(255, 255, 230)
+        Note over FE, DB: 【技能包创建流程】
+        
+        FE->>BE: WebSocket 发送 "帮我创建一个台风响应流程..."
+        BE->>SDK: ClaudeSDKClient.query(prompt=用户需求)
+        SDK->>SDK: 分析需求，生成技能包定义
+        SDK-->>BE: 技能包内容
+        BE-->>FE: 流式返回技能包定义
+        FE->>FE: 渲染技能包定义，用户可修改
+        
+        FE->>BE: POST /api/skills/confirm {skill_name, content}
+        BE->>BE: 生成 SKILL.md 文件内容
+        BE->>DB: INSERT user_skills (元数据)
+        BE->>DB: 写入文件 .claude/skills/{user_id}/{skill_name}/SKILL.md
+        DB-->>BE: 成功
+        BE-->>FE: 创建成功
+        FE->>FE: 提示"可使用 /{skill_name} 调用"
+    end
+
+    %% ===== 技能包执行流程 =====
+    rect rgb(230, 255, 255)
+        Note over FE, DB: 【技能包执行流程】
+        
+        FE->>BE: WebSocket 发送 "/台风积水检测"
+        BE->>BE: 解析技能包调用
+        
+        BE->>DB: SELECT user_skills WHERE user_id=? AND skill_name=?
+        DB-->>BE: 技能包元数据
+        
+        BE->>DB: 读取 SKILL.md 文件
+        DB-->>BE: 技能包完整内容
+        
+        BE->>SDK: ClaudeSDKClient.query(prompt=技能包内容)
+        SDK->>SDK: 理解工作流步骤
+        
+        loop 步骤执行
+            SDK->>BE: 调用自定义工具 (typhoon_tools, device_tools...)
+            BE->>BE: 执行工具，获取结果
+            BE-->>SDK: 工具执行结果
+            SDK-->>BE: 步骤完成消息
+            BE-->>FE: 流式返回进度
+            FE->>FE: 渲染执行状态
+        end
+        
+        SDK-->>BE: 工作流完成
+        BE->>DB: UPDATE sessions (保存结果)
+        BE-->>FE: 执行完成
+    end
 ```
+
+**流程说明：**
+
+| 流程 | 前端 | 后端 | Agent SDK | 数据库 |
+|------|------|------|-----------|--------|
+| **注册** | 发送注册信息 → 显示成功 | 验证 → 创建用户 → 初始化权限 | - | INSERT users + tool_permissions |
+| **登录** | 发送登录 → 存储 Token | 验证密码 → 生成 Token → 加载配置 | - | SELECT users + tool_permissions |
+| **获取 Session** | 请求列表 → 渲染侧边栏 | 验证 Token → 查询 | - | SELECT sessions |
+| **聊天** | WebSocket → 渲染消息 | 加载配置 → 创建 SDK → 处理流 | load() → 执行 → save() | SELECT/UPDATE sessions + Redis |
+| **设置** | 显示/修改 → 保存 | 更新配置 | - | UPDATE users + tool_permissions |
+| **技能包创建** | 描述需求 → 确认保存 | 生成 SKILL.md → 写入 | 分析需求生成定义 | INSERT user_skills + 文件 |
+| **技能包执行** | 输入 `/技能包` → 显示进度 | 解析 → 加载 SKILL.md → 启动 SDK | 执行工作流 → 调用工具 | SELECT user_skills + 文件 |
 
 ### 3.3 核心组件职责
 
