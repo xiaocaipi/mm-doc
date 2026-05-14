@@ -82,7 +82,7 @@ graph TB
     end
 
     subgraph DATABASE["数据层"]
-        DB["MySQL<br/>用户 / Session / 技能包"]
+        DB["TiDB<br/>用户 / Session / 技能包"]
         STORE["Session Store<br/>对话内容"]
         SKILL_FILES["技能包文件<br/>.claude/skills/"]
     end
@@ -111,7 +111,7 @@ graph TB
 | **后端** | Python | 3.10+ | 运行环境 |
 | | FastAPI | 0.100+ | API 框架 |
 | | Claude Agent SDK | 0.1.80+ | Agent 核心 |
-| **数据层** | MySQL | 8.0+ | 用户/Session 元数据 |
+| **数据层** | TiDB | 8.0+ | 用户/Session 元数据 |
 | | Redis | 7+ | Session 内容缓存 |
 | **部署** | Docker | - | 容器化 |
 
@@ -134,7 +134,7 @@ graph TB
 |------|----------|
 | FastAPI | 高性能、原生 async、自动 API 文档 |
 | Claude Agent SDK | 官方 SDK、完整 Agent 能力 |
-| MySQL | 关系型数据、用户/Session 存储 |
+| TiDB | 分布式关系型数据、用户/Session 存储 |
 | Redis | Session 缓存、实时状态 |
 
 ### 2.3 Claude Agent SDK 内置能力
