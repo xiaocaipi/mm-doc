@@ -68,37 +68,49 @@
 
 ```mermaid
 graph TB
-    subgraph FRONTEND["前端"]
-        CHAT["聊天页面<br/>对话 / Session 历史 / 技能包调用"]
-        SETTINGS["用户设置页面<br/>模型 / 工具权限 / 技能包管理"]
+    subgraph FRONTEND["前端应用"]
+        CHAT["聊天页面"]
+        SETTINGS["设置页面"]
+        SKILL_SETTINGS["技能包设置"]
+        BASE_SETTINGS["基础设置页面"]
     end
 
     subgraph BACKEND["后端"]
-        API["API 服务"]
-        USER["用户系统"]
-        SESSION["Session 管理"]
-        AGENT["Agent 引擎"]
-        SKILLS["技能包管理"]
+        AUTH["认证"]
+        CHAT_API["聊天"]
+        SESSION["session"]
+        SETTINGS_API["设置"]
+        SKILLS["技能包"]
     end
 
-    subgraph DATABASE["数据层"]
-        DB["TiDB<br/>用户 / Session / 技能包"]
-        STORE["Session Store<br/>对话内容"]
-        SKILL_FILES["技能包文件<br/>.claude/skills/"]
+    subgraph AGENT["agent"]
+        SDK["claude agent sdk"]
+        HOOKS["权限hooks"]
+        MCP["mcp"]
     end
 
-    FRONTEND --> API
-    API --> USER
-    API --> SESSION
-    API --> AGENT
-    API --> SKILLS
-    USER --> DB
-    SESSION --> DB
-    SESSION --> STORE
-    SKILLS --> DB
-    SKILLS --> SKILL_FILES
-    AGENT --> SDK["Claude Agent SDK"]
-    SDK --> SKILL_FILES
+    subgraph STORAGE["存储"]
+        TIDB["tidb 业务数据"]
+        REDIS["redis<br/>session 缓存"]
+    end
+
+    CHAT --> CHAT_API
+    SETTINGS --> SKILL_SETTINGS
+    SETTINGS --> BASE_SETTINGS
+    SKILL_SETTINGS --> SKILLS
+    BASE_SETTINGS --> SETTINGS_API
+
+    CHAT_API --> SESSION
+    CHAT_API --> AGENT
+    AUTH --> TIDB
+    SESSION --> TIDB
+    SESSION --> REDIS
+    SETTINGS_API --> TIDB
+    SKILLS --> TIDB
+
+    SDK --> HOOKS
+    SDK --> MCP
+    CHAT_API --> SDK
 ```
 
 ### 1.4 技术栈
@@ -161,62 +173,49 @@ graph TB
 
 ```mermaid
 flowchart TB
-    subgraph CLIENT["客户端"]
-        WEB["Web 浏览器"]
-    end
-
     subgraph FRONTEND["前端应用"]
-        REACT["React App"]
-        CHAT_UI["聊天页面"]
-        SETTINGS_UI["用户设置页面"]
-        WS["WebSocket Client"]
+        CHAT["聊天页面"]
+        SETTINGS["设置页面"]
+        SKILL_SETTINGS["技能包设置"]
+        BASE_SETTINGS["基础设置页面"]
     end
 
-    subgraph BACKEND["后端服务"]
-        FASTAPI["FastAPI Server"]
-        
-        subgraph API_MODULES["API 模块"]
-            AUTH_API["认证 API"]
-            CHAT_API["聊天 API"]
-            SESSION_API["Session API"]
-            SETTINGS_API["设置 API"]
-        end
-        
-        subgraph CORE_MODULES["核心模块"]
-            USER_MGR["用户管理"]
-            SESSION_MGR["Session 管理"]
-            AGENT_MGR["Agent 管理"]
-        end
+    subgraph BACKEND["后端"]
+        AUTH["认证"]
+        CHAT_API["聊天"]
+        SESSION["session"]
+        SETTINGS_API["设置"]
+        SKILLS["技能包"]
     end
 
-    subgraph AGENT_ENGINE["Agent 引擎"]
-        SDK["Claude Agent SDK"]
-        TOOLS["自定义工具"]
-        HOOKS["权限 Hooks"]
+    subgraph AGENT["agent"]
+        SDK["claude agent sdk"]
+        HOOKS["权限hooks"]
+        MCP["mcp"]
     end
 
-    subgraph DATA["数据层"]
-        MYSQL["MySQL<br/>用户/Session"]
-        REDIS["Redis<br/>Session 缓存"]
-        FILE["文件存储<br/>Session 内容"]
+    subgraph STORAGE["存储"]
+        TIDB["tidb 业务数据"]
+        REDIS["redis<br/>session 缓存"]
     end
 
-    subgraph EXTERNAL["外部服务"]
-        ANTHROPIC["Anthropic API"]
-        MCP["MCP Servers"]
-    end
+    CHAT --> CHAT_API
+    SETTINGS --> SKILL_SETTINGS
+    SETTINGS --> BASE_SETTINGS
+    SKILL_SETTINGS --> SKILLS
+    BASE_SETTINGS --> SETTINGS_API
 
-    CLIENT --> FRONTEND
-    FRONTEND --> WS
-    WS --> FASTAPI
-    
-    FASTAPI --> API_MODULES
-    API_MODULES --> CORE_MODULES
-    
-    CORE_MODULES --> DATA
-    AGENT_MGR --> SDK
-    SDK --> ANTHROPIC
+    CHAT_API --> SESSION
+    CHAT_API --> AGENT
+    AUTH --> TIDB
+    SESSION --> TIDB
+    SESSION --> REDIS
+    SETTINGS_API --> TIDB
+    SKILLS --> TIDB
+
+    SDK --> HOOKS
     SDK --> MCP
+    CHAT_API --> SDK
 ```
 
 ### 3.2 核心数据流
@@ -269,7 +268,7 @@ sequenceDiagram
     participant API as FastAPI
     participant Agent as Agent引擎
     participant SDK as Claude SDK
-    participant DB as MySQL
+    participant DB as TiDB
     participant FS as 文件系统
 
     User->>Frontend: 描述需求："帮我创建一个台风响应流程..."
@@ -305,7 +304,7 @@ sequenceDiagram
     participant Agent as Agent引擎
     participant SDK as Claude SDK
     participant Tools as 自定义工具
-    participant DB as MySQL
+    participant DB as TiDB
     participant FS as 文件系统
 
     User->>Frontend: 输入 /台风积水检测
@@ -457,7 +456,7 @@ sequenceDiagram
 ```mermaid
 graph TB
     subgraph BOOK["一本书的两层信息"]
-        COVER["书的封面/目录<br/>MySQL Session<br/>───────────<br/>书名 → 对话标题<br/>作者 → 用户<br/>页数 → token数"]
+        COVER["书的封面/目录<br/>TiDB Session<br/>───────────<br/>书名 → 对话标题<br/>作者 → 用户<br/>页数 → token数"]
         CONTENT["书的内容<br/>Redis Session<br/>───────────<br/>第1章 → 第1条消息<br/>第2章 → 第2条消息<br/>..."]
     end
     
@@ -483,7 +482,7 @@ graph TB
 
 | 类型 | 存储位置 | 存储内容 | 用途 |
 |------|----------|----------|------|
-| MySQL Session | MySQL sessions 表 | id, title, tokens, cost 等元数据 | 列表展示、统计、管理 |
+| TiDB Session | TiDB sessions 表 | id, title, tokens, cost 等元数据 | 列表展示、统计、管理 |
 | Redis Session | Redis | messages（消息数组）+ metadata | Agent 对话上下文、会话恢复 |
 
 **关联方式：同一个 session_id**
@@ -499,7 +498,7 @@ flowchart TB
         A4["新建对话"]
     end
     
-    subgraph MYSQL["MySQL（元数据）"]
+    subgraph TIDB["TiDB（元数据）"]
         M1["sessions 表<br/>───────────<br/>id: abc-123<br/>title: 研究React<br/>tokens: 3500<br/>cost: 0.05"]
     end
     
@@ -555,17 +554,17 @@ sequenceDiagram
     participant User as 用户
     participant Frontend as 前端
     participant API as FastAPI
-    participant MySQL as MySQL<br/>元数据
+    participant TiDB as TiDB<br/>元数据
     participant Redis as Redis<br/>内容
     participant SDK as Claude SDK
 
     %% 场景1：新建对话
     rect rgb(200, 230, 200)
-        Note over User, MySQL: 场景1：新建对话
+        Note over User, TiDB: 场景1：新建对话
         User->>Frontend: 点击"新建对话"
         Frontend->>API: POST /api/sessions
-        API->>MySQL: INSERT sessions (user_id, title=null)
-        MySQL-->>API: session_id = "abc-123"
+        API->>TiDB: INSERT sessions (user_id, title=null)
+        TiDB-->>API: session_id = "abc-123"
         API-->>Frontend: {session_id: "abc-123"}
         Frontend-->>User: 进入新对话页面
     end
@@ -584,7 +583,7 @@ sequenceDiagram
         API-->>Frontend: 流式消息
         Frontend-->>User: 显示回复
         SDK->>Redis: save(messages) 自动保存
-        API->>MySQL: UPDATE sessions (tokens, cost, title)
+        API->>TiDB: UPDATE sessions (tokens, cost, title)
     end
 
     %% 场景3：继续对话
@@ -605,11 +604,11 @@ sequenceDiagram
     rect rgb(240, 240, 200)
         Note over User, Redis: 场景4：7天后过期
         Redis->>Redis: Key 过期自动删除
-        Note over Redis: 消息内容丢失<br/>但 MySQL 元数据仍存在
+        Note over Redis: 消息内容丢失<br/>但 TiDB 元数据仍存在
         User->>Frontend: 点击该对话
         Frontend->>API: GET /api/sessions/abc-123
-        API->>MySQL: 查询元数据
-        MySQL-->>API: {id, title, tokens...}
+        API->>TiDB: 查询元数据
+        TiDB-->>API: {id, title, tokens...}
         API->>Redis: load() 加载内容
         Redis-->>API: 空（已过期）
         API-->>Frontend: 对话内容已过期，需新建
@@ -622,7 +621,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     A["用户打开聊天页面"] --> B["请求 Session 列表"]
-    B --> C["API 查询 MySQL"]
+    B --> C["API 查询 TiDB"]
     C --> D["SELECT sessions<br/>WHERE user_id = ?"]
     D --> E["返回元数据列表<br/>───────────<br/>id, title, tokens, cost<br/>created_at, updated_at"]
     E --> F["前端展示列表<br/>───────────<br/>研究React - 昨天 - 3500 tokens<br/>写HTTP服务 - 3天前 - 1500 tokens"]
@@ -631,7 +630,7 @@ flowchart TD
     style D fill:#bbf,stroke:#333
     style E fill:#bfb,stroke:#333
     
-    Note1["备注：这一步只查 MySQL<br/>不访问 Redis<br/>不加载对话内容"]
+    Note1["备注：这一步只查 TiDB<br/>不访问 Redis<br/>不加载对话内容"]
     
     F -.-> Note1
 ```
@@ -641,7 +640,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph STEP1["步骤1：进入对话"]
-        A1["用户点击某个对话"] --> A2["API 查询 MySQL 元数据"]
+        A1["用户点击某个对话"] --> A2["API 查询 TiDB 元数据"]
         A2 --> A3["API 从 Redis 加载内容<br/>RedisSessionStore.load()"]
         A3 --> A4["返回完整消息记录<br/>messages 数组"]
         A4 --> A5["前端显示历史对话"]
@@ -652,7 +651,7 @@ flowchart TD
         B2 --> B3["SDK 调用 load()<br/>获取历史上下文"]
         B3 --> B4["Agent 基于上下文生成回复"]
         B4 --> B5["SDK 自动调用 save()<br/>保存到 Redis"]
-        B5 --> B6["更新 MySQL tokens/cost"]
+        B5 --> B6["更新 TiDB tokens/cost"]
     end
     
     STEP1 --> STEP2
@@ -664,7 +663,7 @@ flowchart TD
 
 ### 5.7 Session 数据模型
 
-**MySQL sessions 表（元数据）：**
+**TiDB sessions 表（元数据）：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -711,7 +710,7 @@ flowchart TD
     subgraph EXPIRED["过期对话"]
         E1["7天无活动"]
         E2["Redis Key 自动删除"]
-        E3["MySQL 元数据仍存在"]
+        E3["TiDB 元数据仍存在"]
     end
     
     subgraph HANDLE["过期处理"]
@@ -730,8 +729,8 @@ flowchart TD
 
 **过期策略说明：**
 
-| 状态 | Redis | MySQL | 用户看到 |
-|------|-------|-------|----------|
+| 状态 | Redis | TiDB | 用户看到 |
+|------|-------|------|----------|
 | 活跃（7天内） | 存在 | 存在 | 正常对话 |
 | 过期（7天后） | 已删除 | 存在 | 提示过期，需新建 |
 | 用户删除 | 删除 | 删除 | 从列表移除 |
@@ -740,19 +739,19 @@ flowchart TD
 
 | API | 方法 | 说明 |
 |------|------|------|
-| `/api/sessions` | GET | 获取用户 Session 列表（只返回 MySQL 元数据） |
-| `/api/sessions` | POST | 创建新 Session（写入 MySQL，Redis 自动创建） |
-| `/api/sessions/{id}` | GET | 获取 Session 详情（MySQL 元数据 + Redis 内容） |
-| `/api/sessions/{id}` | DELETE | 删除 Session（同时删除 MySQL 和 Redis） |
-| `/api/sessions/{id}/title` | PATCH | 更新标题（只更新 MySQL） |
+| `/api/sessions` | GET | 获取用户 Session 列表（只返回 TiDB 元数据） |
+| `/api/sessions` | POST | 创建新 Session（写入 TiDB，Redis 自动创建） |
+| `/api/sessions/{id}` | GET | 获取 Session 详情（TiDB 元数据 + Redis 内容） |
+| `/api/sessions/{id}` | DELETE | 删除 Session（同时删除 TiDB 和 Redis） |
+| `/api/sessions/{id}/title` | PATCH | 更新标题（只更新 TiDB） |
 
 ### 5.10 存储方案对比
 
-| 对比项 | 本方案<br/>MySQL + Redis | 全 MySQL 方案 | 全 Redis 方案 |
-|--------|--------------------------|---------------|---------------|
-| 元数据存储 | MySQL（持久） | MySQL | Redis |
-| 内容存储 | Redis（快） | MySQL | Redis |
-| 列表查询速度 | 快（只查 MySQL） | 中 | 快 |
+| 对比项 | 本方案<br/>TiDB + Redis | 全 TiDB 方案 | 全 Redis 方案 |
+|--------|-------------------------|---------------|---------------|
+| 元数据存储 | TiDB（持久） | TiDB | Redis |
+| 内容存储 | Redis（快） | TiDB | Redis |
+| 列表查询速度 | 快（只查 TiDB） | 中 | 快 |
 | 对话恢复速度 | 快（Redis） | 中 | 快 |
 | 长期保存 | 元数据可保存 | 可保存 | 不可靠 |
 | 成本 | 中 | 低 | 高（内存） |
@@ -780,12 +779,13 @@ flowchart TD
 │   │   └── 流式输出动画
 │   └── InputArea：输入框、发送按钮、技能包快捷入口
 │
-└── 用户设置页面
-    ├── 模型设置
-    ├── 工具权限设置
-    ├── MCP Server 配置
-    ├── Agent 选项设置
-    └── 技能包管理
+└── 设置页面
+    ├── 基础设置页面
+    │   ├── 模型设置
+    │   ├── 工具权限设置
+    │   ├── MCP Server 配置
+    │   └── Agent 选项设置
+    └── 技能包设置
         ├── 技能包列表
         ├── 创建/编辑技能包
         └── 技能包详情（SKILL.md 编辑器）
@@ -827,7 +827,7 @@ flowchart TD
 | Thinking | 隐藏或可展开的思考过程 |
 | Error | 红色高亮错误信息 |
 
-### 6.4 用户设置页面
+### 6.4 基础设置页面
 
 **模型设置：**
 
@@ -1032,7 +1032,7 @@ flowchart TD
 sequenceDiagram
     participant User as 用户
     participant API as API
-    participant DB as MySQL
+    participant DB as TiDB
 
     User->>API: POST /api/auth/register
     API->>DB: INSERT users (default_model=NULL...)
@@ -1138,7 +1138,7 @@ sequenceDiagram
     participant Agent as Agent
     participant SDK as Claude SDK
     participant Hook as PreToolUse Hook
-    participant DB as MySQL (user_tool_permissions)
+    participant DB as TiDB (user_tool_permissions)
     participant User as 用户
 
     Agent->>SDK: 决定执行 Bash 工具
@@ -1457,7 +1457,7 @@ description: Use when handling typhoon weather scenarios - match affected areas 
 │  存储位置：                                                               │
 │  ─────────────────────────────────────────────────────────────────────  │
 │                                                                         │
-│  MySQL（技能包元数据）：                                                   │
+│  TiDB（技能包元数据）：                                                   │
 │  ┌───────────────────────────────────────────────────────────────────┐ │
 │  │  user_skills 表                                                    │ │
 │  │  - user_id       用户ID                                            │ │
@@ -1486,7 +1486,7 @@ description: Use when handling typhoon weather scenarios - match affected areas 
 │                                                                         │
 │  为什么用两种存储？                                                       │
 │  ─────────────────────────────────────────────────────────────────────  │
-│  - MySQL：快速查询、列表展示、元数据管理                                   │
+│  - TiDB：快速查询、列表展示、元数据管理                                   │
 │  - 文件：SDK 直接读取、内容编辑、版本管理                                  │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -1578,7 +1578,7 @@ sequenceDiagram
     participant API as API
     participant Agent as Agent引擎
     participant SDK as Claude SDK
-    participant DB as MySQL
+    participant DB as TiDB
     participant FS as 文件系统
 
     User->>Frontend: 描述需求："帮我创建一个台风响应流程..."
@@ -1827,11 +1827,11 @@ agent_platform/
 
 ---
 
-## 12. 数据库设计（MySQL）
+## 12. 数据库设计（TiDB）
 
 ### 12.1 存储概览
 
-**MySQL 数据表：**
+**TiDB 数据表：**
 
 | 表名 | 说明 |
 |------|------|
@@ -1851,7 +1851,7 @@ agent_platform/
 
 ```mermaid
 graph TB
-    subgraph MYSQL["MySQL（持久化）"]
+    subgraph TIDB["TiDB（持久化）"]
         M1["sessions 表<br/>───────────<br/>Session 元数据<br/>id, title, tokens, cost<br/>created_at, updated_at"]
     end
     
@@ -1883,10 +1883,10 @@ graph TB
 
 | 数据类型 | 存储位置 | 用途 | 过期策略 |
 |----------|----------|------|----------|
-| Session 元数据 | MySQL sessions 表 | 列表查询、统计 | 永久保存 |
+| Session 元数据 | TiDB sessions 表 | 列表查询、统计 | 永久保存 |
 | Session 消息内容 | Redis | Agent上下文、恢复对话 | 7天后自动过期 |
 
-**关联方式：MySQL sessions.id = Redis key session:{id}**
+**关联方式：TiDB sessions.id = Redis key session:{id}**
 
 ### 12.3 数据表字段设计
 
@@ -1952,8 +1952,8 @@ graph TB
 | updated_at | TIMESTAMP | 更新时间 |
 
 **说明：**
-- Redis 内容 7 天后自动过期，MySQL 元数据永久保存
-- 用户删除 Session 时，同时删除 MySQL 记录和 Redis 内容
+- Redis 内容 7 天后自动过期，TiDB 元数据永久保存
+- 用户删除 Session 时，同时删除 TiDB 记录和 Redis 内容
 
 **系统配置表 (system_config)：**
 
