@@ -123,7 +123,7 @@ graph TB
 | **后端** | Python | 3.10+ | 运行环境 |
 | | FastAPI | 0.100+ | API 框架 |
 | | Claude Agent SDK | 0.1.80+ | Agent 核心 |
-| **数据层** | TiDB | 8.0+ | 用户/Session 元数据 |
+| **数据层** | MySQL | 8.0+ | 用户/Session 元数据 |
 | | Redis | 7+ | Session 内容缓存 |
 | **部署** | Docker | - | 容器化 |
 
@@ -146,7 +146,7 @@ graph TB
 |------|----------|
 | FastAPI | 高性能、原生 async、自动 API 文档 |
 | Claude Agent SDK | 官方 SDK、完整 Agent 能力 |
-| TiDB | 分布式关系型数据、用户/Session 存储 |
+| MySQL | 关系型数据、用户/Session 存储 |
 | Redis | Session 缓存、实时状态 |
 
 ### 2.3 Claude Agent SDK 内置能力
@@ -210,7 +210,7 @@ flowchart TB
     %% ========== 数据存储层 ==========
     subgraph STORAGE["💾 数据存储"]
         direction LR
-        TIDB["🗄️ TiDB<br/>业务数据"]
+        MYSQL["MySQL<br/>业务数据"]
         REDIS["⚡ Redis<br/>Session 缓存"]
     end
 
@@ -301,7 +301,7 @@ sequenceDiagram
     participant API as FastAPI
     participant Agent as Agent引擎
     participant SDK as Claude SDK
-    participant DB as TiDB
+    participant DB as MySQL
     participant FS as 文件系统
 
     User->>Frontend: 描述需求："帮我创建一个台风响应流程..."
@@ -337,7 +337,7 @@ sequenceDiagram
     participant Agent as Agent引擎
     participant SDK as Claude SDK
     participant Tools as 自定义工具
-    participant DB as TiDB
+    participant DB as MySQL
     participant FS as 文件系统
 
     User->>Frontend: 输入 /台风积水检测
@@ -403,80 +403,112 @@ sequenceDiagram
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
 
-### 4.2 用户配置分布
+### 4.2 用户配置存储架构
 
+```mermaid
+graph TB
+    subgraph USERS["users 表"]
+        U1["用户基本配置<br/>───────────<br/>default_model<br/>mcp_servers (JSON)<br/>agent_options (JSON)"]
+    end
+    
+    subgraph TOOLS["user_tool_permissions 表"]
+        T1["工具权限配置<br/>───────────<br/>user_id<br/>tool_name<br/>enabled<br/>requires_confirmation<br/>───────────<br/>每用户每工具一条记录"]
+    end
+    
+    subgraph SYSTEM["system_config 表"]
+        S1["系统默认配置<br/>───────────<br/>default_model<br/>available_models<br/>default_tools_config"]
+    end
+    
+    USERS -->|"用户设置"| U1
+    TOOLS -->|"工具权限"| T1
+    SYSTEM -->|"默认值"| S1
+    
+    S1 -.->|"用户未设置时"| USERS
+    S1 -.->|"初始化时"| TOOLS
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     用户配置的存储位置                                     │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  users 表字段：                                                          │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  - default_model      → 用户默认模型（单值）                              │
-│  - mcp_servers        → MCP Server 配置（JSON）                          │
-│  - agent_options      → Agent 运行选项（JSON）                           │
-│                                                                         │
-│  user_tool_permissions 表：                                              │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  - 工具权限配置（独立表，每用户每工具一条记录）                             │
-│  - 字段：user_id, tool_name, enabled, requires_confirmation             │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
 
-### 4.3 用户工具权限示例数据
-
-**user_tool_permissions 表数据：**
-
-| user_id | tool_name | enabled | requires_confirmation |
-|---------|-----------|---------|----------------------|
-| user-001 | Bash | true | true |
-| user-001 | Read | true | false |
-| user-001 | Write | true | true |
-| user-001 | Edit | true | true |
-| user-001 | WebSearch | true | false |
-| user-002 | Bash | false | false |
-| user-002 | Read | true | false |
-| ... | ... | ... | ... |
-
-### 4.4 认证流程
+### 4.3 用户注册流程
 
 ```mermaid
 sequenceDiagram
     participant User as 用户
     participant Frontend as 前端
     participant API as API
-    participant JWT as JWT 服务
-    participant DB as 数据库
-
-    User->>Frontend: 登录页面输入
-    Frontend->>API: POST /api/auth/login
-    API->>DB: 查询用户
-    DB-->>API: 用户信息
+    participant DB as MySQL
     
-    API->>API: 验证密码 (bcrypt)
+    rect rgb(200, 230, 200)
+        Note over User, DB: 步骤1：创建用户记录
+        User->>Frontend: 填写注册信息<br/>username, email, password
+        Frontend->>Frontend: 前端验证格式
+        Frontend->>API: POST /api/auth/register
+        API->>API: 后端验证<br/>用户名/邮箱是否已存在
+        API->>API: 密码加密 (bcrypt)
+        API->>DB: INSERT users<br/>default_model = NULL<br/>mcp_servers = NULL<br/>agent_options = NULL
+        DB-->>API: user_id = "user-001"
+    end
     
-    alt 密码正确
-        API->>JWT: 生成 JWT Token
-        JWT-->>API: Token
-        API-->>Frontend: {token, user_info, settings}
-        Frontend->>Frontend: 存储 Token (localStorage)
-        Frontend-->>User: 跳转到聊天页面
-    else 密码错误
-        API-->>Frontend: 401 错误
-        Frontend-->>User: 显示错误信息
+    rect rgb(200, 200, 230)
+        Note over API, DB: 步骤2：初始化工具权限
+        API->>DB: SELECT system_config<br/>WHERE key='default_tools_config'
+        DB-->>API: 默认工具列表<br/>[Bash, Read, Write, Edit...]
+        
+        loop 每个默认工具
+            API->>DB: INSERT user_tool_permissions<br/>user_id, tool_name<br/>enabled, requires_confirmation
+        end
+        
+        DB-->>API: 工具权限创建完成
+    end
+    
+    rect rgb(230, 200, 200)
+        Note over API, User: 步骤3：生成Token返回
+        API->>API: 生成 JWT Token
+        API-->>Frontend: {token, user_info}
+        Frontend->>Frontend: 存储 Token
+        Frontend-->>User: 注册成功，跳转聊天页面
     end
 ```
 
-### 4.4 认证 API 设计
+### 4.4 用户登录流程
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Frontend as 前端
+    participant API as API
+    participant DB as MySQL
+    
+    User->>Frontend: 输入 username, password
+    Frontend->>API: POST /api/auth/login
+    API->>DB: SELECT users<br/>WHERE username = ?
+    DB-->>API: 用户信息<br/>{id, password_hash, default_model...}
+    
+    API->>API: 验证密码 (bcrypt.compare)
+    
+    alt 密码正确
+        API->>DB: SELECT user_tool_permissions<br/>WHERE user_id = ?
+        DB-->>API: 工具权限列表
+        
+        API->>API: 生成 JWT Token (含 user_id)
+        API-->>Frontend: {token, user_info, settings}
+        
+        Frontend->>Frontend: 存储 Token (localStorage)
+        Frontend-->>User: 跳转聊天页面
+        
+    else 密码错误
+        API-->>Frontend: 401 错误
+        Frontend-->>User: 显示"用户名或密码错误"
+    end
+```
+
+### 4.5 认证 API 设计
 
 | API | 方法 | 说明 |
 |------|------|------|
-| `/api/auth/login` | POST | 用户登录，返回 JWT Token + 用户配置 |
-| `/api/auth/register` | POST | 用户注册 |
-| `/api/auth/logout` | POST | 用户登出 |
-| `/api/auth/me` | GET | 获取当前用户信息 + 配置 |
-| `/api/auth/refresh` | POST | 刷新 Token |
+| `/api/auth/login` | POST | 用户登录，返回 JWT Token + 用户配置 + 工具权限 |
+| `/api/auth/register` | POST | 用户注册，自动初始化工具权限 |
+| `/api/auth/logout` | POST | 用户登出（前端清除 Token） |
+| `/api/auth/me` | GET | 获取当前用户信息 + 全部配置 |
+| `/api/auth/refresh` | POST | 刷新 Token（延长有效期） |
 
 ---
 
@@ -489,7 +521,7 @@ sequenceDiagram
 ```mermaid
 graph TB
     subgraph BOOK["一本书的两层信息"]
-        COVER["书的封面/目录<br/>TiDB Session<br/>───────────<br/>书名 → 对话标题<br/>作者 → 用户<br/>页数 → token数"]
+        COVER["书的封面/目录<br/>MySQL Session<br/>───────────<br/>书名 → 对话标题<br/>作者 → 用户<br/>页数 → token数"]
         CONTENT["书的内容<br/>Redis Session<br/>───────────<br/>第1章 → 第1条消息<br/>第2章 → 第2条消息<br/>..."]
     end
     
@@ -515,7 +547,7 @@ graph TB
 
 | 类型 | 存储位置 | 存储内容 | 用途 |
 |------|----------|----------|------|
-| TiDB Session | TiDB sessions 表 | id, title, tokens, cost 等元数据 | 列表展示、统计、管理 |
+| MySQL Session | MySQL sessions 表 | id, title, tokens, cost 等元数据 | 列表展示、统计、管理 |
 | Redis Session | Redis | messages（消息数组）+ metadata | Agent 对话上下文、会话恢复 |
 
 **关联方式：同一个 session_id**
@@ -531,7 +563,7 @@ flowchart TB
         A4["新建对话"]
     end
     
-    subgraph TIDB["TiDB（元数据）"]
+    subgraph MYSQL["MySQL（元数据）"]
         M1["sessions 表<br/>───────────<br/>id: abc-123<br/>title: 研究React<br/>tokens: 3500<br/>cost: 0.05"]
     end
     
@@ -587,17 +619,17 @@ sequenceDiagram
     participant User as 用户
     participant Frontend as 前端
     participant API as FastAPI
-    participant TiDB as TiDB<br/>元数据
+    participant MySQL as MySQL<br/>元数据
     participant Redis as Redis<br/>内容
     participant SDK as Claude SDK
 
     %% 场景1：新建对话
     rect rgb(200, 230, 200)
-        Note over User, TiDB: 场景1：新建对话
+        Note over User, MySQL: 场景1：新建对话
         User->>Frontend: 点击"新建对话"
         Frontend->>API: POST /api/sessions
-        API->>TiDB: INSERT sessions (user_id, title=null)
-        TiDB-->>API: session_id = "abc-123"
+        API->>MySQL: INSERT sessions (user_id, title=null)
+        MySQL-->>API: session_id = "abc-123"
         API-->>Frontend: {session_id: "abc-123"}
         Frontend-->>User: 进入新对话页面
     end
@@ -616,7 +648,7 @@ sequenceDiagram
         API-->>Frontend: 流式消息
         Frontend-->>User: 显示回复
         SDK->>Redis: save(messages) 自动保存
-        API->>TiDB: UPDATE sessions (tokens, cost, title)
+        API->>MySQL: UPDATE sessions (tokens, cost, title)
     end
 
     %% 场景3：继续对话
@@ -637,11 +669,11 @@ sequenceDiagram
     rect rgb(240, 240, 200)
         Note over User, Redis: 场景4：7天后过期
         Redis->>Redis: Key 过期自动删除
-        Note over Redis: 消息内容丢失<br/>但 TiDB 元数据仍存在
+        Note over Redis: 消息内容丢失<br/>但 MySQL 元数据仍存在
         User->>Frontend: 点击该对话
         Frontend->>API: GET /api/sessions/abc-123
-        API->>TiDB: 查询元数据
-        TiDB-->>API: {id, title, tokens...}
+        API->>MySQL: 查询元数据
+        MySQL-->>API: {id, title, tokens...}
         API->>Redis: load() 加载内容
         Redis-->>API: 空（已过期）
         API-->>Frontend: 对话内容已过期，需新建
@@ -654,7 +686,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     A["用户打开聊天页面"] --> B["请求 Session 列表"]
-    B --> C["API 查询 TiDB"]
+    B --> C["API 查询 MySQL"]
     C --> D["SELECT sessions<br/>WHERE user_id = ?"]
     D --> E["返回元数据列表<br/>───────────<br/>id, title, tokens, cost<br/>created_at, updated_at"]
     E --> F["前端展示列表<br/>───────────<br/>研究React - 昨天 - 3500 tokens<br/>写HTTP服务 - 3天前 - 1500 tokens"]
@@ -663,7 +695,7 @@ flowchart TD
     style D fill:#bbf,stroke:#333
     style E fill:#bfb,stroke:#333
     
-    Note1["备注：这一步只查 TiDB<br/>不访问 Redis<br/>不加载对话内容"]
+    Note1["备注：这一步只查 MySQL<br/>不访问 Redis<br/>不加载对话内容"]
     
     F -.-> Note1
 ```
@@ -673,7 +705,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph STEP1["步骤1：进入对话"]
-        A1["用户点击某个对话"] --> A2["API 查询 TiDB 元数据"]
+        A1["用户点击某个对话"] --> A2["API 查询 MySQL 元数据"]
         A2 --> A3["API 从 Redis 加载内容<br/>RedisSessionStore.load()"]
         A3 --> A4["返回完整消息记录<br/>messages 数组"]
         A4 --> A5["前端显示历史对话"]
@@ -684,7 +716,7 @@ flowchart TD
         B2 --> B3["SDK 调用 load()<br/>获取历史上下文"]
         B3 --> B4["Agent 基于上下文生成回复"]
         B4 --> B5["SDK 自动调用 save()<br/>保存到 Redis"]
-        B5 --> B6["更新 TiDB tokens/cost"]
+        B5 --> B6["更新 MySQL tokens/cost"]
     end
     
     STEP1 --> STEP2
@@ -696,7 +728,7 @@ flowchart TD
 
 ### 5.7 Session 数据模型
 
-**TiDB sessions 表（元数据）：**
+**MySQL sessions 表（元数据）：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -743,7 +775,7 @@ flowchart TD
     subgraph EXPIRED["过期对话"]
         E1["7天无活动"]
         E2["Redis Key 自动删除"]
-        E3["TiDB 元数据仍存在"]
+        E3["MySQL 元数据仍存在"]
     end
     
     subgraph HANDLE["过期处理"]
@@ -762,7 +794,7 @@ flowchart TD
 
 **过期策略说明：**
 
-| 状态 | Redis | TiDB | 用户看到 |
+| 状态 | Redis | MySQL | 用户看到 |
 |------|-------|------|----------|
 | 活跃（7天内） | 存在 | 存在 | 正常对话 |
 | 过期（7天后） | 已删除 | 存在 | 提示过期，需新建 |
@@ -772,19 +804,19 @@ flowchart TD
 
 | API | 方法 | 说明 |
 |------|------|------|
-| `/api/sessions` | GET | 获取用户 Session 列表（只返回 TiDB 元数据） |
-| `/api/sessions` | POST | 创建新 Session（写入 TiDB，Redis 自动创建） |
-| `/api/sessions/{id}` | GET | 获取 Session 详情（TiDB 元数据 + Redis 内容） |
-| `/api/sessions/{id}` | DELETE | 删除 Session（同时删除 TiDB 和 Redis） |
-| `/api/sessions/{id}/title` | PATCH | 更新标题（只更新 TiDB） |
+| `/api/sessions` | GET | 获取用户 Session 列表（只返回 MySQL 元数据） |
+| `/api/sessions` | POST | 创建新 Session（写入 MySQL，Redis 自动创建） |
+| `/api/sessions/{id}` | GET | 获取 Session 详情（MySQL 元数据 + Redis 内容） |
+| `/api/sessions/{id}` | DELETE | 删除 Session（同时删除 MySQL 和 Redis） |
+| `/api/sessions/{id}/title` | PATCH | 更新标题（只更新 MySQL） |
 
 ### 5.10 存储方案对比
 
-| 对比项 | 本方案<br/>TiDB + Redis | 全 TiDB 方案 | 全 Redis 方案 |
+| 对比项 | 本方案<br/>MySQL + Redis | 全 MySQL 方案 | 全 Redis 方案 |
 |--------|-------------------------|---------------|---------------|
-| 元数据存储 | TiDB（持久） | TiDB | Redis |
-| 内容存储 | Redis（快） | TiDB | Redis |
-| 列表查询速度 | 快（只查 TiDB） | 中 | 快 |
+| 元数据存储 | MySQL（持久） | MySQL | Redis |
+| 内容存储 | Redis（快） | MySQL | Redis |
+| 列表查询速度 | 快（只查 MySQL） | 中 | 快 |
 | 对话恢复速度 | 快（Redis） | 中 | 快 |
 | 长期保存 | 元数据可保存 | 可保存 | 不可靠 |
 | 成本 | 中 | 低 | 高（内存） |
@@ -988,109 +1020,239 @@ flowchart TD
 ### 8.1 配置加载流程
 
 ```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Frontend as 前端
+    participant API as API
+    participant DB as MySQL
+    
+    rect rgb(200, 230, 200)
+        Note over User, DB: 用户登录时加载配置
+        User->>Frontend: 登录成功
+        Frontend->>API: GET /api/auth/me<br/>携带 JWT Token
+        API->>API: 解析 Token 获取 user_id
+        API->>DB: SELECT users WHERE id = user_id
+        DB-->>API: 用户基本信息<br/>default_model, mcp_servers...
+        
+        API->>DB: SELECT user_tool_permissions<br/>WHERE user_id = user_id
+        DB-->>API: 工具权限列表
+    end
+    
+    rect rgb(200, 200, 230)
+        Note over API, Frontend: 合并配置返回
+        API->>API: 合并用户配置 + 系统默认
+        API-->>Frontend: {user_info, settings, tools}
+        Frontend->>Frontend: 存储配置到本地状态
+    end
+    
+    rect rgb(230, 200, 200)
+        Note over Frontend, User: 创建 Agent 时使用
+        User->>Frontend: 开始对话
+        Frontend->>API: WebSocket 连接
+        API->>API: 用用户配置创建 Agent<br/>model = default_model<br/>tools = 工具权限配置
+        API->>API: ClaudeSDKClient(options)
+    end
+```
+
+### 8.2 配置存储架构
+
+```mermaid
+graph TB
+    subgraph USERS_TB["users 表"]
+        U1["default_model<br/>VARCHAR(50)"]
+        U2["mcp_servers<br/>JSON"]
+        U3["agent_options<br/>JSON"]
+    end
+    
+    subgraph TOOLS_TB["user_tool_permissions 表"]
+        T1["user_id<br/>VARCHAR(36)"]
+        T2["tool_name<br/>VARCHAR(50)"]
+        T3["enabled<br/>BOOLEAN"]
+        T4["requires_confirmation<br/>BOOLEAN"]
+    end
+    
+    subgraph SYSTEM_TB["system_config 表"]
+        S1["default_model<br/>系统默认模型"]
+        S2["available_models<br/>可用模型列表"]
+        S3["default_tools_config<br/>工具默认配置"]
+    end
+    
+    subgraph RESULT["最终配置"]
+        R1["用户配置"]
+        R2["工具权限"]
+    end
+    
+    USERS_TB --> R1
+    TOOLS_TB --> R2
+    SYSTEM_TB -.->|"用户未设置时"| USERS_TB
+    SYSTEM_TB -.->|"注册初始化"| TOOLS_TB
+```
+
+### 8.3 配置优先级规则
+
+```mermaid
 flowchart TD
-    LOGIN["用户登录"] --> GET_USER["获取用户信息<br/>（users表）"]
-    GET_USER --> GET_TOOLS["获取工具权限<br/>（user_tool_permissions表）"]
+    A["需要某项配置"] --> B{"用户是否设置了?"}
     
-    GET_USER --> PARSE["解析用户配置"]
-    GET_TOOLS --> PARSE
+    B -->|"是"| C["使用用户设置"]
+    B -->|"否"| D["使用系统默认"]
     
-    PARSE --> MERGE["合并系统默认配置"]
+    C --> E["最终配置"]
+    D --> E
     
-    MERGE --> BUILD_OPTIONS["构建 ClaudeAgentOptions"]
-    BUILD_OPTIONS --> CREATE_AGENT["创建 ClaudeSDKClient"]
+    subgraph EXAMPLE["示例"]
+        EX1["用户设置: claude-opus-4-6"]
+        EX2["系统默认: claude-sonnet-4-5"]
+        EX3["结果: 使用 claude-opus-4-6"]
+    end
     
-    CREATE_AGENT --> RUN["运行 Agent"]
+    E --> EXAMPLE
+    
+    style C fill:#bfb
+    style D fill:#bbf
 ```
 
-### 8.2 配置存储分布
+**具体规则：**
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        配置存储分布                                       │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  users 表（用户基本配置）：                                                │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  - default_model      VARCHAR(50)   默认模型                             │
-│  - mcp_servers        JSON          MCP Server 配置                      │
-│  - agent_options      JSON          Agent 运行选项                        │
-│                                                                         │
-│  user_tool_permissions 表（工具权限）：                                    │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  - user_id            VARCHAR(36)   用户ID                               │
-│  - tool_name          VARCHAR(50)   工具名称                             │
-│  - enabled            BOOLEAN       是否启用                             │
-│  - requires_confirmation  BOOLEAN   是否需要确认                         │
-│                                                                         │
-│  system_config 表（系统默认）：                                            │
-│  ─────────────────────────────────────────────────────────────────────  │
-│  - default_model                    系统默认模型                          │
-│  - available_models                 可用模型列表                          │
-│  - default_tools_config             工具默认配置                          │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+| 配置项 | 用户设置位置 | 系统默认位置 | 优先级 |
+|------|-------------|--------------|--------|
+| 默认模型 | users.default_model | system_config.default_model | 用户设置 > 系统默认 |
+| MCP Server | users.mcp_servers | 无 | 用户设置 |
+| Agent 选项 | users.agent_options | 无 | 用户设置 |
+| 工具权限 | user_tool_permissions 表 | system_config.default_tools_config | 用户设置 > 系统默认 |
 
-### 8.3 配置优先级
+### 8.4 用户设置修改流程
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        配置优先级                                         │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  优先级从高到低：                                                         │
-│                                                                         │
-│  1. 用户个人配置                                                          │
-│     - users 表：default_model, mcp_servers, agent_options               │
-│     - user_tool_permissions 表：工具权限                                  │
-│                                                                         │
-│  2. 系统默认配置（system_config 表）                                      │
-│     - 用户没有设置时使用的默认值                                           │
-│                                                                         │
-│  合并逻辑：                                                               │
-│  - 用户设置了 → 用用户设置                                                │
-│  - 用户没设置 → 用系统默认                                                │
-│                                                                         │
-│  工具权限：                                                               │
-│  - 新用户注册时，自动创建默认工具权限记录                                   │
-│  - 用户可修改自己的工具权限                                               │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Frontend as 前端
+    participant API as API
+    participant DB as MySQL
+    
+    rect rgb(200, 230, 200)
+        Note over User, DB: 修改默认模型
+        User->>Frontend: 选择新模型<br/>claude-opus-4-6
+        Frontend->>Frontend: 显示修改预览
+        User->>Frontend: 点击保存
+        Frontend->>API: PUT /api/settings/model<br/>{model: "claude-opus-4-6"}
+        API->>DB: UPDATE users<br/>SET default_model = ?
+        DB-->>API: 更新成功
+        API-->>Frontend: {success: true}
+        Frontend-->>User: 显示"模型已更新"
+    end
+    
+    rect rgb(200, 200, 230)
+        Note over User, DB: 修改工具权限
+        User->>Frontend: 修改工具配置<br/>Bash: enabled=true, confirm=true
+        User->>Frontend: 点击保存
+        Frontend->>API: PUT /api/settings/tools<br/>[{tool: "Bash", enabled: true, confirm: true}]
+        API->>DB: UPDATE user_tool_permissions<br/>WHERE user_id=? AND tool_name=?
+        DB-->>API: 更新成功
+        API-->>Frontend: {success: true}
+        Frontend-->>User: 显示"工具权限已更新"
+    end
+    
+    rect rgb(230, 200, 200)
+        Note over User, DB: 修改 MCP Server
+        User->>Frontend: 添加 MCP Server 配置
+        User->>Frontend: 点击保存
+        Frontend->>API: PUT /api/settings/mcp-servers<br/>[{name: "weather-mcp", config: {...}}]
+        API->>DB: UPDATE users<br/>SET mcp_servers = JSON
+        DB-->>API: 更新成功
+        API-->>Frontend: {success: true}
+        Frontend-->>User: 显示"MCP Server已更新"
+    end
 ```
 
-### 8.4 新用户初始化
+### 8.5 设置修改生效时机
+
+```mermaid
+flowchart TD
+    subgraph MODIFIED["用户修改设置"]
+        M1["修改模型"]
+        M2["修改工具权限"]
+        M3["修改 MCP Server"]
+    end
+    
+    subgraph EFFECT["生效时机"]
+        E1["新对话立即生效<br/>───────────<br/>创建新 Session 时<br/>使用新配置创建 Agent"]
+        E2["当前对话<br/>───────────<br/>下次 Agent 响应时生效"]
+        E3["需重启 Agent<br/>───────────<br/>MCP 变化需重新连接"]
+    end
+    
+    M1 --> E1
+    M1 --> E2
+    M2 --> E1
+    M2 --> E2
+    M3 --> E1
+    M3 --> E3
+    
+    style E1 fill:#bfb
+    style E2 fill:#bbf
+    style E3 fill:#ff9
+```
+
+**生效规则说明：**
+
+| 设置类型 | 当前对话 | 新对话 | 特殊说明 |
+|----------|----------|--------|----------|
+| 默认模型 | 下次响应生效 | 立即生效 | 当前 Agent 会继续用旧模型直到对话结束 |
+| 工具权限 | 下次响应生效 | 立即生效 | PreToolUse Hook 实时读取最新配置 |
+| MCP Server | 需重启 Agent | 立即生效 | MCP 连接变化需重新初始化 |
+| Agent 选项 | 需重启 Agent | 立即生效 | 部分选项需要重启 Agent |
+
+### 8.6 新用户初始化
 
 ```mermaid
 sequenceDiagram
     participant User as 用户
     participant API as API
-    participant DB as TiDB
-
-    User->>API: POST /api/auth/register
-    API->>DB: INSERT users (default_model=NULL...)
+    participant DB as MySQL
     
-    Note over API: 获取系统默认工具列表
+    rect rgb(200, 230, 200)
+        Note over User, DB: 步骤1：创建用户记录
+        User->>API: POST /api/auth/register
+        API->>DB: INSERT users<br/>default_model = NULL<br/>mcp_servers = NULL<br/>agent_options = NULL
+        DB-->>API: user_id = "user-001"
+    end
     
-    API->>DB: SELECT system_config WHERE key='default_tools_config'
-    DB-->>API: 默认工具配置
+    rect rgb(200, 200, 230)
+        Note over API, DB: 步骤2：初始化工具权限
+        API->>DB: SELECT system_config<br/>WHERE key='default_tools_config'
+        DB-->>API: 默认工具配置
+        
+        loop 每个默认工具
+            API->>DB: INSERT user_tool_permissions<br/>user_id, tool_name<br/>enabled, requires_confirmation
+        end
+    end
     
-    Note over API: 为新用户创建默认工具权限
-    
-    API->>DB: INSERT user_tool_permissions<br/>(Bash, Read, Write, Edit...)
-    
-    API-->>User: 注册成功
+    rect rgb(230, 200, 200)
+        Note over API, User: 步骤3：返回注册成功
+        API-->>User: 注册成功<br/>用户首次对话时<br/>使用系统默认模型
+    end
 ```
 
-### 8.3 系统默认配置
+### 8.7 系统默认配置
 
-**system_config 表（系统级默认值）：**
-
-| 配置项 | 默认值 | 说明 |
-|------|------|------|
-| default_model | claude-sonnet-4-5 | 系统默认模型 |
-| available_models | ["claude-sonnet-4-5", "claude-opus-4-6", "claude-haiku-4-5"] | 可用模型列表 |
-| default_tools_config | {...} | 工具默认配置 |
+```mermaid
+graph TB
+    subgraph SYSTEM["system_config 表"]
+        S1["default_model<br/>───────────<br/>claude-sonnet-4-5"]
+        S2["available_models<br/>───────────<br/>claude-sonnet-4-5<br/>claude-opus-4-6<br/>claude-haiku-4-5"]
+        S3["default_tools_config<br/>───────────<br/>Bash: enabled, confirm<br/>Read: enabled, no-confirm<br/>Write: enabled, confirm<br/>Edit: enabled, confirm"]
+    end
+    
+    subgraph USE["使用场景"]
+        U1["用户未设置模型时<br/>使用 default_model"]
+        U2["前端展示模型列表<br/>使用 available_models"]
+        U3["新用户注册时<br/>初始化 default_tools_config"]
+    end
+    
+    S1 --> U1
+    S2 --> U2
+    S3 --> U3
+```
 
 ---
 
@@ -1171,7 +1333,7 @@ sequenceDiagram
     participant Agent as Agent
     participant SDK as Claude SDK
     participant Hook as PreToolUse Hook
-    participant DB as TiDB (user_tool_permissions)
+    participant DB as MySQL (user_tool_permissions)
     participant User as 用户
 
     Agent->>SDK: 决定执行 Bash 工具
@@ -1490,7 +1652,7 @@ description: Use when handling typhoon weather scenarios - match affected areas 
 │  存储位置：                                                               │
 │  ─────────────────────────────────────────────────────────────────────  │
 │                                                                         │
-│  TiDB（技能包元数据）：                                                   │
+│  MySQL（技能包元数据）：                                                   │
 │  ┌───────────────────────────────────────────────────────────────────┐ │
 │  │  user_skills 表                                                    │ │
 │  │  - user_id       用户ID                                            │ │
@@ -1519,7 +1681,7 @@ description: Use when handling typhoon weather scenarios - match affected areas 
 │                                                                         │
 │  为什么用两种存储？                                                       │
 │  ─────────────────────────────────────────────────────────────────────  │
-│  - TiDB：快速查询、列表展示、元数据管理                                   │
+│  - MySQL：快速查询、列表展示、元数据管理                                   │
 │  - 文件：SDK 直接读取、内容编辑、版本管理                                  │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -1611,7 +1773,7 @@ sequenceDiagram
     participant API as API
     participant Agent as Agent引擎
     participant SDK as Claude SDK
-    participant DB as TiDB
+    participant DB as MySQL
     participant FS as 文件系统
 
     User->>Frontend: 描述需求："帮我创建一个台风响应流程..."
@@ -1860,11 +2022,11 @@ agent_platform/
 
 ---
 
-## 12. 数据库设计（TiDB）
+## 12. 数据库设计（MySQL）
 
 ### 12.1 存储概览
 
-**TiDB 数据表：**
+**MySQL 数据表：**
 
 | 表名 | 说明 |
 |------|------|
@@ -1884,7 +2046,7 @@ agent_platform/
 
 ```mermaid
 graph TB
-    subgraph TIDB["TiDB（持久化）"]
+    subgraph TIDB["MySQL（持久化）"]
         M1["sessions 表<br/>───────────<br/>Session 元数据<br/>id, title, tokens, cost<br/>created_at, updated_at"]
     end
     
@@ -1916,10 +2078,10 @@ graph TB
 
 | 数据类型 | 存储位置 | 用途 | 过期策略 |
 |----------|----------|------|----------|
-| Session 元数据 | TiDB sessions 表 | 列表查询、统计 | 永久保存 |
+| Session 元数据 | MySQL sessions 表 | 列表查询、统计 | 永久保存 |
 | Session 消息内容 | Redis | Agent上下文、恢复对话 | 7天后自动过期 |
 
-**关联方式：TiDB sessions.id = Redis key session:{id}**
+**关联方式：MySQL sessions.id = Redis key session:{id}**
 
 ### 12.3 数据表字段设计
 
@@ -1985,8 +2147,8 @@ graph TB
 | updated_at | TIMESTAMP | 更新时间 |
 
 **说明：**
-- Redis 内容 7 天后自动过期，TiDB 元数据永久保存
-- 用户删除 Session 时，同时删除 TiDB 记录和 Redis 内容
+- Redis 内容 7 天后自动过期，MySQL 元数据永久保存
+- 用户删除 Session 时，同时删除 MySQL 记录和 Redis 内容
 
 **系统配置表 (system_config)：**
 
