@@ -398,6 +398,7 @@ sequenceDiagram
 | email | VARCHAR(100) | 邮箱 |
 | password_hash | VARCHAR(255) | 密码（bcrypt加密） |
 | default_model | VARCHAR(50) | 默认模型 |
+| user_directory | VARCHAR(255) | 用户工作目录（限制文件操作范围） |
 | mcp_servers | JSON | MCP Server 配置 |
 | agent_options | JSON | Agent 运行选项 |
 | created_at | TIMESTAMP | 创建时间 |
@@ -408,7 +409,7 @@ sequenceDiagram
 ```mermaid
 graph TB
     subgraph USERS["users 表"]
-        U1["用户基本配置<br/>───────────<br/>default_model<br/>mcp_servers (JSON)<br/>agent_options (JSON)"]
+        U1["用户基本配置<br/>───────────<br/>default_model<br/>user_directory<br/>mcp_servers (JSON)<br/>agent_options (JSON)"]
     end
     
     subgraph TOOLS["user_tool_permissions 表"]
@@ -416,7 +417,7 @@ graph TB
     end
     
     subgraph SYSTEM["system_config 表"]
-        S1["系统默认配置<br/>───────────<br/>default_model<br/>available_models<br/>default_tools_config"]
+        S1["系统默认配置<br/>───────────<br/>default_model<br/>available_models<br/>default_tools_config<br/>default_user_directory_base"]
     end
     
     USERS -->|"用户设置"| U1
@@ -435,6 +436,7 @@ sequenceDiagram
     participant Frontend as 前端
     participant API as API
     participant DB as TiDB
+    participant FS as 文件系统
     
     rect rgb(200, 230, 200)
         Note over User, DB: 步骤1：创建用户记录
@@ -443,12 +445,23 @@ sequenceDiagram
         Frontend->>API: POST /api/auth/register
         API->>API: 后端验证<br/>用户名/邮箱是否已存在
         API->>API: 密码加密 (bcrypt)
-        API->>DB: INSERT users<br/>default_model = NULL<br/>mcp_servers = NULL<br/>agent_options = NULL
+        API->>API: 生成用户目录路径<br/>user_directory = /data/users/{username}
+        API->>DB: INSERT users<br/>default_model = NULL<br/>user_directory = /data/users/{username}<br/>mcp_servers = NULL<br/>agent_options = NULL
         DB-->>API: user_id = "user-001"
     end
     
     rect rgb(200, 200, 230)
-        Note over API, DB: 步骤2：初始化工具权限
+        Note over API, FS: 步骤2：创建用户目录
+        API->>API: 获取默认用户目录基路径<br/>从 system_config 读取
+        API->>API: 构建用户目录路径<br/>/data/users/{username}
+        API->>FS: 创建用户目录<br/>mkdir -p /data/users/{username}
+        FS-->>API: 目录创建成功
+        API->>FS: 设置目录权限<br/>chown {user} /data/users/{username}
+        FS-->>API: 权限设置完成
+    end
+    
+    rect rgb(230, 230, 200)
+        Note over API, DB: 步骤3：初始化工具权限
         API->>DB: SELECT system_config<br/>WHERE key='default_tools_config'
         DB-->>API: 默认工具列表<br/>[Bash, Read, Write, Edit...]
         
@@ -460,10 +473,10 @@ sequenceDiagram
     end
     
     rect rgb(230, 200, 200)
-        Note over API, User: 步骤3：生成Token返回
+        Note over API, User: 步骤4：生成Token返回
         API->>API: 生成 JWT Token
-        API-->>Frontend: {token, user_info}
-        Frontend->>Frontend: 存储 Token
+        API-->>Frontend: {token, user_info, user_directory}
+        Frontend->>Frontend: 存储 Token 和 用户目录
         Frontend-->>User: 注册成功，跳转聊天页面
     end
 ```
@@ -1258,220 +1271,428 @@ graph TB
 
 ## 9. 工具权限设计
 
-### 9.1 权限配置位置
+### 9.1 工具权限整体架构
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    工具权限存储位置                                        │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  user_tool_permissions 表（独立数据表）：                                  │
-│                                                                         │
-│  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │  user_id       VARCHAR(36)    用户ID                              │ │
-│  │  tool_name     VARCHAR(50)    工具名称                            │ │
-│  │  enabled       BOOLEAN        是否启用此工具                       │ │
-│  │  requires_confirmation  BOOLEAN   执行前是否需要确认               │ │
-│  └───────────────────────────────────────────────────────────────────┘ │
-│                                                                         │
-│  每个用户每个工具一条记录，便于：                                          │
-│  - 查询用户所有工具权限                                                   │
-│  - 批量更新权限配置                                                       │
-│  - 统计分析用户权限设置                                                   │
-│                                                                         │
-│  示例数据：                                                               │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  user_id | tool_name | enabled | requires_confirmation          │   │
-│  │  ─────────────────────────────────────────────────────────────  │   │
-│  │  user-001 | Bash     | true    | true                           │   │
-│  │  user-001 | Read     | true    | false                          │   │
-│  │  user-001 | Write    | true    | true                           │   │
-│  │  user-002 | Bash     | false   | false                          │   │
-│  │  user-002 | Read     | true    | false                          │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph LAYER1["第一层：数据存储"]
+        DB1["TiDB<br/>user_tool_permissions 表<br/>───────────<br/>user_id<br/>tool_name<br/>enabled<br/>requires_confirmation"]
+        DB2["TiDB<br/>users.user_directory<br/>───────────<br/>用户工作目录<br/>文件操作范围限制"]
+    end
+    
+    subgraph LAYER2["第二层：权限控制"]
+        HOOK["PreToolUse Hook<br/>───────────<br/>读取用户配置<br/>检查工具权限<br/>检查目录范围<br/>返回 decision"]
+    end
+    
+    subgraph LAYER3["第三层：SDK执行"]
+        SDK["Claude Agent SDK<br/>───────────<br/>permission_mode: bypassPermissions<br/>通过 Hook 控制权限"]
+    end
+    
+    subgraph LAYER4["第四层：用户交互"]
+        FRONTEND["前端确认框<br/>───────────<br/>requires_confirmation=true<br/>弹出确认框"]
+    end
+    
+    DB1 --> HOOK
+    DB2 --> HOOK
+    HOOK --> SDK
+    SDK -->|"需要确认时"| FRONTEND
+    FRONTEND -->|"用户选择"| SDK
 ```
 
-### 9.2 权限与 SDK 的关联机制
+**架构说明：**
 
-**SDK 提供的权限能力：**
+| 层级 | 组件 | 职责 |
+|------|------|------|
+| 数据层 | TiDB user_tool_permissions 表 | 存储用户对每个工具的权限配置（启用/禁用、是否需确认） |
+| 数据层 | TiDB users.user_directory | 存储用户工作目录，限制文件操作范围 |
+| 控制层 | PreToolUse Hook | 读取配置、检查工具权限、检查目录范围、返回决定 |
+| 执行层 | Claude Agent SDK | 调用 Hook，根据结果执行或拒绝 |
+| 交互层 | 前端确认框 | 用户手动确认高风险操作 |
 
+### 9.2 SDK 权限机制与自定义系统
+
+```mermaid
+flowchart LR
+    subgraph SDK_MODE["SDK 内置权限模式"]
+        M1["permission_mode: default<br/>───────────<br/>SDK 内置交互确认<br/>每次询问用户"]
+        M2["permission_mode: bypassPermissions<br/>───────────<br/>绕过所有检查<br/>全部自动执行"]
+    end
+    
+    subgraph OUR_SYSTEM["我们的自定义系统"]
+        S1["使用 bypassPermissions 模式<br/>───────────<br/>绕过 SDK 内置权限"]
+        S2["通过 PreToolUse Hook<br/>───────────<br/>实现自定义权限控制"]
+        S3["读取 user_tool_permissions 表<br/>───────────<br/>判断用户配置"]
+    end
+    
+    M2 --> S1
+    S1 --> S2
+    S2 --> S3
+    
+    style M2 fill:#bfb
+    style S2 fill:#bbf
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Claude Agent SDK 的权限机制                            │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  SDK 提供的权限模式（permission_mode）：                                  │
-│  ─────────────────────────────────────────────────────────────────────  │
-│                                                                         │
-│  permission_mode: "default"                                             │
-│  - SDK 内置的交互式权限确认                                              │
-│  - 每次工具执行时询问用户是否允许                                         │
-│                                                                         │
-│  permission_mode: "bypassPermissions"                                    │
-│  - 绕过所有权限检查，全部自动执行                                         │
-│  - 我们使用这个模式，通过 Hook 实现自己的权限系统                         │
-│                                                                         │
-│  ─────────────────────────────────────────────────────────────────────  │
-│                                                                         │
-│  SDK 提供的 Hooks 系统：                                                  │
-│  ─────────────────────────────────────────────────────────────────────  │
-│                                                                         │
-│  PreToolUse Hook                                                        │
-│  - 在工具执行前触发                                                      │
-│  - 可以返回 decision: "allow" / "deny"                                  │
-│  - 这是接入自定义权限系统的关键入口                                       │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
 
-**接入流程：**
+**为什么选择 bypassPermissions + Hook？**
+
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| SDK default 模式 | 简单，无需开发 | 无法存储用户偏好，每次都需确认 |
+| bypassPermissions + Hook | 可存储用户配置、支持细粒度控制 | 需要开发 Hook 逻辑 |
+
+**我们的选择：bypassPermissions + PreToolUse Hook**
+
+- Hook 在工具执行前被调用
+- Hook 从数据库读取用户配置
+- Hook 返回 allow/deny 决定是否执行
+
+### 9.3 PreToolUse Hook 工作流程
 
 ```mermaid
 sequenceDiagram
-    participant Agent as Agent
+    participant Agent as Agent引擎
     participant SDK as Claude SDK
     participant Hook as PreToolUse Hook
-    participant DB as TiDB (user_tool_permissions)
+    participant DB as TiDB
+    participant Frontend as 前端
     participant User as 用户
-
-    Agent->>SDK: 决定执行 Bash 工具
     
-    Note over SDK: SDK 触发 PreToolUse Hook
+    rect rgb(200, 230, 200)
+        Note over Agent, Hook: 步骤1：Agent决定执行工具
+        Agent->>SDK: 决定执行 Bash 工具
+        Note over SDK: 工具执行前，触发 PreToolUse Hook
+    end
     
-    SDK->>Hook: 调用 Hook，传入 tool_name="Bash"
+    rect rgb(200, 200, 230)
+        Note over SDK, DB: 步骤2：Hook检查用户配置
+        SDK->>Hook: 调用 Hook(tool_name="Bash", tool_input="ls -la")
+        Hook->>Hook: 获取当前用户 user_id
+        Hook->>DB: SELECT FROM user_tool_permissions<br/>WHERE user_id=? AND tool_name="Bash"
+        DB-->>Hook: {enabled: true, requires_confirmation: true}
+    end
     
-    Hook->>DB: SELECT FROM user_tool_permissions<br/>WHERE user_id=current_user AND tool_name="Bash"
-    DB-->>Hook: {enabled: true, requires_confirmation: true}
+    rect rgb(230, 200, 200)
+        Note over Hook, SDK: 步骤3：Hook返回决定
+        Hook->>Hook: enabled = true? → 是，允许执行
+        Hook-->>SDK: {decision: "allow", requires_confirmation: true}
+    end
     
-    Note over Hook: Hook 检查用户配置
+    rect rgb(240, 240, 200)
+        Note over SDK, User: 步骤4：根据确认配置处理
+        alt requires_confirmation = true
+            SDK->>Frontend: 发送确认请求<br/>{tool: "Bash", input: "ls -la"}
+            Frontend->>User: 弹出确认框
+            User->>Frontend: 点击"允许"
+            Frontend-->>SDK: 用户允许
+            SDK->>Agent: 执行工具
+        else requires_confirmation = false
+            SDK->>Agent: 直接执行工具
+        end
+    end
     
-    Hook->>Hook: enabled = true? → 是
-    Hook->>Hook: 返回 decision = "allow"
-    
-    Hook-->>SDK: 返回 {decision: "allow"}
-    
-    Note over SDK: requires_confirmation = true<br/>SDK 弹出确认框
-    
-    SDK->>User: 弹出确认框："执行 Bash: ls -la?"
-    User->>SDK: 点击"允许"
-    
-    SDK->>Agent: 执行工具
-    
-    Agent-->>User: 显示执行结果
+    rect rgb(200, 230, 230)
+        Note over Agent, User: 步骤5：返回结果
+        Agent-->>SDK: 工具执行结果
+        SDK-->>Frontend: 流式返回结果
+        Frontend-->>User: 显示执行结果
+    end
 ```
 
-### 9.3 工具权限检查流程
+### 9.4 权限检查流程图
 
 ```mermaid
 flowchart TD
-    AGENT["Agent 决定执行工具"] --> CHECK["检查用户工具配置"]
+    START["Agent 决定执行工具"] --> LOAD["Hook 加载用户配置<br/>从 TiDB 读取"]
     
-    CHECK --> ENABLED{"用户启用此工具?"}
-    ENABLED -->|"否"| DENY1["拒绝：工具已禁用<br/>告诉用户可在设置中启用"]
-    ENABLED -->|"是"| CONFIRM{"需要确认?"}
+    LOAD --> CHECK_ENABLE{"enabled = true?"}
     
-    CONFIRM -->|"否"| EXECUTE["直接执行工具"]
-    CONFIRM -->|"是"| ASK["前端弹出确认框"]
+    CHECK_ENABLE -->|"否"| DENY_DISABLED["拒绝执行<br/>───────────<br/>decision = deny<br/>告知用户：此工具已禁用<br/>可在设置中启用"]
     
-    ASK --> USER{"用户选择"}
-    USER -->|"允许"| EXECUTE
-    USER -->|"拒绝"| DENY2["拒绝：用户取消"]
+    CHECK_ENABLE -->|"是"| CHECK_FILE_TOOL{"是否为文件操作工具?<br/>Read/Write/Edit"}
+    
+    CHECK_FILE_TOOL -->|"是"| CHECK_DIRECTORY{"目标路径在用户目录内?"}
+    
+    CHECK_FILE_TOOL -->|"否"| CHECK_CONFIRM
+    
+    CHECK_DIRECTORY -->|"否"| DENY_DIRECTORY["拒绝执行<br/>───────────<br/>decision = deny<br/>告知用户：路径超出范围<br/>只能在 user_directory 内操作"]
+    
+    CHECK_DIRECTORY -->|"是"| CHECK_CONFIRM{"requires_confirmation = true?"}
+    
+    CHECK_CONFIRM -->|"否"| ALLOW_AUTO["自动允许执行<br/>───────────<br/>decision = allow<br/>无需用户确认"]
+    
+    CHECK_CONFIRM -->|"是"| ALLOW_CONFIRM["允许执行但需确认<br/>───────────<br/>decision = allow<br/>弹出确认框"]
+    
+    ALLOW_CONFIRM --> SHOW_DIALOG["前端弹出确认框<br/>显示工具名称和参数"]
+    
+    SHOW_DIALOG --> USER_CHOICE{"用户选择"}
+    
+    USER_CHOICE -->|"允许"| EXECUTE["执行工具"]
+    
+    USER_CHOICE -->|"拒绝"| DENY_USER["拒绝执行<br/>───────────<br/>用户取消操作"]
+    
+    USER_CHOICE -->|"记住选择"| SAVE_CHOICE["保存用户选择<br/>───────────<br/>更新 requires_confirmation=false"]
+    
+    SAVE_CHOICE --> EXECUTE
+    
+    ALLOW_AUTO --> EXECUTE
+    
+    EXECUTE --> RESULT["返回执行结果"]
+    
+    DENY_DISABLED --> END["结束"]
+    DENY_USER --> END
+    DENY_DIRECTORY --> END
+    
+    style DENY_DISABLED fill:#f66
+    style DENY_USER fill:#f66
+    style DENY_DIRECTORY fill:#f66
+    style ALLOW_AUTO fill:#bfb
+    style EXECUTE fill:#bbf
 ```
 
-### 9.4 实际场景示例
+### 9.5 用户目录范围检查
 
-**场景1：用户启用 Read 且不需要确认**
-
-```
-用户配置：tools.Read = {enabled: true, requires_confirmation: false}
-
-流程：
-Agent 决定执行 Read
-    ↓
-Hook 检查用户配置
-    ↓
-enabled = true? → 是
-    ↓
-requires_confirmation = false? → 是
-    ↓
-Hook 返回 allow
-    ↓
-直接执行
-
-结果：成功执行，无需确认
-```
-
-**场景2：用户禁用 Bash**
-
-```
-用户配置：tools.Bash = {enabled: false, requires_confirmation: true}
-
-流程：
-Agent 决定执行 Bash
-    ↓
-Hook 检查用户配置
-    ↓
-enabled = false? → 是
-    ↓
-Hook 返回 deny
-
-结果：拒绝执行，Agent 告知用户 "此工具已禁用，可在设置中启用"
+```mermaid
+flowchart TB
+    subgraph CHECK_FLOW["目录范围检查流程"]
+        C1["获取工具参数中的文件路径"]
+        C2["读取用户 user_directory<br/>例如: /data/users/zhangsan"]
+        C3["路径规范化<br/>解析相对路径、符号链接"]
+        C4["检查路径是否以 user_directory 开头"]
+        C5{"路径是否在范围内?"}
+        C6["允许操作"]
+        C7["拒绝操作<br/>告知用户路径超出范围"]
+    end
+    
+    C1 --> C2 --> C3 --> C4 --> C5
+    C5 -->|"是"| C6
+    C5 -->|"否"| C7
+    
+    style C7 fill:#f66
+    style C6 fill:#bfb
 ```
 
-**场景3：用户启用 Bash 且需要确认**
+**受目录限制的工具：**
 
+| 工具 | 检查内容 | 示例 |
+|------|----------|------|
+| Read | 检查读取的文件路径 | `/data/users/zhangsan/project/file.txt` ✓ |
+| Write | 检查写入的文件路径 | `/etc/config.json` ✗ (超出范围) |
+| Edit | 检查编辑的文件路径 | `/home/user/data` ✗ (超出范围) |
+| Bash | 检查命令中的文件路径 | `rm /data/users/zhangsan/tmp/*` ✓ |
+
+**不受目录限制的工具：**
+
+| 工具 | 原因 |
+|------|------|
+| WebSearch | 不涉及文件操作 |
+| WebFetch | 不涉及文件操作 |
+| Agent | 不直接涉及文件操作 |
+
+**目录范围检查示例：**
+
+```mermaid
+graph TB
+    subgraph USER_DIR["用户目录: /data/users/zhangsan"]
+        D1["✅ /data/users/zhangsan"]
+        D2["✅ /data/users/zhangsan/project"]
+        D3["✅ /data/users/zhangsan/project/src/file.py"]
+        D4["✅ /data/users/zhangsan/../zhangsan<br/>规范化后仍在范围内"]
+    end
+    
+    subgraph OUT_OF_DIR["超出范围"]
+        O1["❌ /data/users/lisi<br/>其他用户目录"]
+        O2["❌ /etc/config.json<br/>系统目录"]
+        O3["❌ /root<br/>root用户目录"]
+        O4["❌ /data/users/zhangsan/../lisi<br/>规范化后指向其他用户"]
+    end
+    
+    style D1 fill:#bfb
+    style D2 fill:#bfb
+    style D3 fill:#bfb
+    style D4 fill:#bfb
+    style O1 fill:#f66
+    style O2 fill:#f66
+    style O3 fill:#f66
+    style O4 fill:#f66
 ```
-用户配置：tools.Bash = {enabled: true, requires_confirmation: true}
 
-流程：
-Agent 决定执行 Bash
-    ↓
-Hook 检查用户配置
-    ↓
-enabled = true? → 是
-    ↓
-Hook 返回 allow
-    ↓
-SDK 弹出确认框："执行命令: ls -la?"
-    ↓
-用户点击"允许"
-    ↓
-执行工具
+### 9.6 不同场景下的权限处理
 
-结果：成功执行
+```mermaid
+flowchart TB
+    subgraph SCENE1["场景1：Read工具，enabled=true, confirm=false"]
+        S1A["Agent 决定执行 Read"] --> S1B["Hook 查询配置"]
+        S1B --> S1C["enabled=true"]
+        S1C --> S1D["confirm=false"]
+        S1D --> S1E["直接执行，无需确认"]
+        S1E --> S1F["✅ 成功执行"]
+    end
+    
+    subgraph SCENE2["场景2：Bash工具，enabled=false"]
+        S2A["Agent 决定执行 Bash"] --> S2B["Hook 查询配置"]
+        S2B --> S2C["enabled=false"]
+        S2C --> S2D["decision=deny"]
+        S2D --> S2E["❌ 拒绝执行<br/>告知用户已禁用"]
+    end
+    
+    subgraph SCENE3["场景3：Write工具，enabled=true, confirm=true"]
+        S3A["Agent 决定执行 Write"] --> S3B["Hook 查询配置"]
+        S3B --> S3C["enabled=true"]
+        S3C --> S3D["confirm=true"]
+        S3D --> S3E["弹出确认框"]
+        S3E --> S3F{"用户选择"}
+        S3F -->|"允许"| S3G["✅ 执行成功"]
+        S3F -->|"拒绝"| S3H["❌ 用户取消"]
+    end
+    
+    style S1F fill:#bfb
+    style S2E fill:#f66
+    style S3G fill:#bfb
+    style S3H fill:#f66
 ```
 
-### 9.5 前端确认框设计
+### 9.7 工具分类与默认权限建议
 
+```mermaid
+graph TB
+    subgraph SAFE["低风险工具（建议：enabled=true, confirm=false）"]
+        T1["Read<br/>───────────<br/>只读文件<br/>无破坏性"]
+        T2["WebSearch<br/>───────────<br/>搜索网页<br/>无破坏性"]
+        T3["WebFetch<br/>───────────<br/>获取网页<br/>无破坏性"]
+    end
+    
+    subgraph RISK["高风险工具（建议：enabled=true, confirm=true）"]
+        T4["Bash<br/>───────────<br/>执行命令<br/>可能删除/修改"]
+        T5["Write<br/>───────────<br/>写入文件<br/>可能覆盖"]
+        T6["Edit<br/>───────────<br/>编辑文件<br/>可能修改内容"]
+    end
+    
+    subgraph OPTIONAL["可选工具（用户自行决定）"]
+        T7["Agent<br/>───────────<br/>启动子Agent<br/>消耗资源"]
+        T8["NotebookEdit<br/>───────────<br/>编辑Notebook<br/>可能修改数据"]
+    end
+    
+    SAFE -->|"自动执行"| AUTO
+    RISK -->|"需要确认"| CONFIRM
+    OPTIONAL -->|"用户配置"| USER_CHOICE
 ```
-+--------------------------------------------------+
-|  ⚠️ 工具执行确认                                   |
-+--------------------------------------------------+
-|                                                  |
-|  Agent 想要执行以下工具：                          |
-|                                                  |
-|  工具：Bash                                       |
-|  内容：rm -rf /tmp/test                          |
-|                                                  |
-|  +--------------------------------------------+  |
-|  |  [✓] 记住此选择，本次对话不再询问            |  |
-|  +--------------------------------------------+  |
-|                                                  |
-|  [允许执行]  [拒绝]                               |
-+--------------------------------------------------+
+
+**系统默认工具配置：**
+
+| 工具名称 | enabled | requires_confirmation | 说明 |
+|----------|---------|----------------------|------|
+| Read | true | false | 只读操作，默认无需确认 |
+| Bash | true | true | 命令执行有风险，需确认 |
+| Write | true | true | 写入文件可能覆盖，需确认 |
+| Edit | true | true | 编辑文件可能修改，需确认 |
+| WebSearch | true | false | 网络搜索无风险，无需确认 |
+| WebFetch | true | false | 获取网页无风险，无需确认 |
+
+### 9.8 前端确认框设计
+
+```mermaid
+graph TB
+    subgraph DIALOG["确认框流程"]
+        D1["接收 SDK 确认请求<br/>───────────<br/>{tool_name, tool_input}"]
+        D2["生成确认框内容<br/>───────────<br/>根据工具类型显示不同信息"]
+        D3["弹出确认框<br/>───────────<br/>显示工具名称和参数"]
+        D4["等待用户选择"]
+        D5["返回用户决定<br/>───────────<br/>allow / deny"]
+    end
+    
+    D1 --> D2 --> D3 --> D4 --> D5
 ```
 
-**确认框显示内容：**
+**各工具确认框显示内容：**
 
-| 工具 | 显示内容 |
-|------|----------|
-| Bash | 显示要执行的命令 |
-| Read | 显示要读取的文件路径 |
-| Write | 显示要写入的文件路径 |
-| Edit | 显示 old_string 和 new_string 的摘要 |
-| WebFetch | 显示 URL |
+| 工具 | 显示标题 | 显示内容 | 示例 |
+|------|----------|----------|------|
+| Bash | 执行命令确认 | 完整命令内容 | `ls -la /home/user` |
+| Read | 读取文件确认 | 文件路径 | `/data/config.json` |
+| Write | 写入文件确认 | 文件路径 + 内容摘要 | `/data/output.txt` (500字符) |
+| Edit | 编辑文件确认 | 文件路径 + 修改摘要 | 将 `old` 改为 `new` |
+| WebFetch | 获取网页确认 | URL 地址 | `https://example.com/api` |
+
+**确认框 UI 结构：**
+
+```mermaid
+graph TB
+    subgraph UI["确认框UI"]
+        HEADER["标题：工具执行确认"]
+        TOOL_INFO["工具信息：<br/>───────────<br/>工具名称：Bash<br/>执行内容：ls -la /tmp"]
+        CHECKBOX["选项：<br/>───────────<br/>[✓] 记住此选择，本次对话不再询问"]
+        BUTTONS["按钮：<br/>───────────<br/>[允许执行] [拒绝]"]
+    end
+    
+    HEADER --> TOOL_INFO --> CHECKBOX --> BUTTONS
+```
+
+### 9.9 权限配置修改流程
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Frontend as 前端
+    participant API as API
+    participant DB as TiDB
+    
+    rect rgb(200, 230, 200)
+        Note over User, Frontend: 步骤1：用户打开设置页面
+        User->>Frontend: 点击"工具权限设置"
+        Frontend->>API: GET /api/settings/tools
+        API->>DB: SELECT FROM user_tool_permissions<br/>WHERE user_id=?
+        DB-->>API: 工具权限列表
+        API-->>Frontend: 返回工具配置列表
+        Frontend-->>User: 显示当前配置<br/>每个工具的启用/确认状态
+    end
+    
+    rect rgb(200, 200, 230)
+        Note over User, DB: 步骤2：用户修改配置
+        User->>Frontend: 修改 Bash 配置<br/>enabled: true, confirm: true
+        User->>Frontend: 点击"保存"
+        Frontend->>Frontend: 收集所有修改
+        Frontend->>API: PUT /api/settings/tools<br/>[{tool: "Bash", enabled: true, confirm: true}]
+        API->>DB: UPDATE user_tool_permissions<br/>WHERE user_id=? AND tool_name=?
+        DB-->>API: 更新成功
+        API-->>Frontend: {success: true}
+        Frontend-->>User: 显示"设置已保存"
+    end
+    
+    rect rgb(230, 200, 200)
+        Note over User, Frontend: 步骤3：新配置生效
+        Note over Frontend: 下次 Agent 执行工具时<br/>Hook 会读取最新配置
+        Note over Frontend: 新对话立即生效<br/>当前对话下次响应生效
+    end
+```
+
+### 9.10 权限配置生效时机
+
+```mermaid
+flowchart TD
+    subgraph MODIFY["修改权限配置"]
+        M1["用户修改工具权限"]
+        M2["保存到 TiDB"]
+    end
+    
+    subgraph EFFECT["生效时机"]
+        E1["新对话<br/>───────────<br/>创建新 Session 时<br/>Agent 使用最新配置"]
+        E2["当前对话<br/>───────────<br/>下次工具执行时<br/>Hook 实时读取最新配置"]
+    end
+    
+    MODIFY --> M2
+    M2 --> E1
+    M2 --> E2
+    
+    style E1 fill:#bfb
+    style E2 fill:#bbf
+```
+
+**生效规则：**
+
+| 配置修改 | 生效时机 | 说明 |
+|----------|----------|------|
+| enabled 变化 | 下次工具执行 | Hook 每次执行都重新读取配置 |
+| requires_confirmation 变化 | 下次工具执行 | 实时生效 |
+| 新对话创建 | 立即生效 | Agent 初始化时使用最新配置 |
 
 ---
 
@@ -2052,6 +2273,7 @@ erDiagram
         VARCHAR(100) email UK "邮箱（唯一）"
         VARCHAR(255) password_hash "密码哈希"
         VARCHAR(50) default_model "默认模型"
+        VARCHAR(255) user_directory "用户工作目录"
         JSON mcp_servers "MCP Server配置"
         JSON agent_options "Agent选项"
         TIMESTAMP created_at "创建时间"
@@ -2150,10 +2372,11 @@ graph TB
         F3["email<br/>VARCHAR(100)<br/>UK<br/>───────────<br/>邮箱<br/>唯一，用于找回密码"]
         F4["password_hash<br/>VARCHAR(255)<br/>───────────<br/>密码哈希<br/>bcrypt加密存储"]
         F5["default_model<br/>VARCHAR(50)<br/>───────────<br/>默认模型<br/>可为空，使用系统默认"]
-        F6["mcp_servers<br/>JSON<br/>───────────<br/>MCP Server配置<br/>JSON数组格式"]
-        F7["agent_options<br/>JSON<br/>───────────<br/>Agent运行选项<br/>JSON对象格式"]
-        F8["created_at<br/>TIMESTAMP<br/>───────────<br/>创建时间<br/>注册时间"]
-        F9["updated_at<br/>TIMESTAMP<br/>───────────<br/>更新时间<br/>每次修改设置时更新"]
+        F6["user_directory<br/>VARCHAR(255)<br/>───────────<br/>用户工作目录<br/>文件操作范围限制"]
+        F7["mcp_servers<br/>JSON<br/>───────────<br/>MCP Server配置<br/>JSON数组格式"]
+        F8["agent_options<br/>JSON<br/>───────────<br/>Agent运行选项<br/>JSON对象格式"]
+        F9["created_at<br/>TIMESTAMP<br/>───────────<br/>创建时间<br/>注册时间"]
+        F10["updated_at<br/>TIMESTAMP<br/>───────────<br/>更新时间<br/>每次修改设置时更新"]
     end
 ```
 
@@ -2166,6 +2389,7 @@ graph TB
 | email | VARCHAR(100) | UNIQUE, NOT NULL | - | 邮箱，可用于找回密码 |
 | password_hash | VARCHAR(255) | NOT NULL | - | bcrypt加密后的密码 |
 | default_model | VARCHAR(50) | - | NULL | 默认模型，为空则用系统默认 |
+| user_directory | VARCHAR(255) | NOT NULL | - | 用户工作目录，限制文件操作范围 |
 | mcp_servers | JSON | - | NULL | MCP Server配置数组 |
 | agent_options | JSON | - | NULL | Agent运行选项对象 |
 | created_at | TIMESTAMP | NOT NULL | CURRENT_TIMESTAMP | 创建时间 |
@@ -2188,6 +2412,7 @@ graph TB
     "email": "zhangsan@example.com",
     "password_hash": "$2b$12$...",
     "default_model": "claude-sonnet-4-5",
+    "user_directory": "/data/users/zhangsan",
     "mcp_servers": [
         {
             "name": "weather-mcp",
@@ -2204,6 +2429,16 @@ graph TB
     "updated_at": "2025-05-14 15:20:00"
 }
 ```
+
+**user_directory 字段说明：**
+
+| 项目 | 说明 |
+|------|------|
+| 用途 | 限制用户文件操作范围，只能在此目录及其子目录内操作 |
+| 格式 | 绝对路径，如 `/data/users/zhangsan` |
+| 初始化 | 用户注册时系统自动创建对应目录 |
+| 安全性 | 防止用户访问/修改系统目录或其他用户的目录 |
+| 影响工具 | Read、Write、Edit 等文件操作工具 |
 
 ---
 
