@@ -1298,15 +1298,22 @@ graph TB
     UI -->|"用户选择"| SDK
 ```
 
-**核心组件：**
+**核心组件职责：**
 
-| 层级 | 组件 | 职责 |
-|------|------|------|
-| 数据层 | user_tool_permissions | 存储工具权限配置（enabled、requires_confirmation） |
-| 数据层 | user_directory | 用户工作目录，限制文件操作范围 |
-| 控制层 | PreToolUse Hook | 权限检查 + 目录范围检查，返回执行决定 |
-| 执行层 | Claude SDK | 调用 Hook，根据结果执行或拒绝 |
-| 交互层 | 前端确认框 | 用户手动确认高风险操作 |
+```mermaid
+flowchart LR
+    D1["user_tool_permissions<br/>───────────<br/>存储工具权限配置"] --> C
+    D2["user_directory<br/>───────────<br/>用户工作目录限制"] --> C
+    C["PreToolUse Hook<br/>───────────<br/>权限检查+目录检查"] --> S
+    S["Claude SDK<br/>───────────<br/>执行工具"] --> U
+    U["前端确认框<br/>───────────<br/>用户手动确认"]
+    
+    style D1 fill:#bbf
+    style D2 fill:#bbf
+    style C fill:#bfb
+    style S fill:#ff9
+    style U fill:#f9f
+```
 
 **权限配置数据：**
 
@@ -1389,11 +1396,34 @@ sequenceDiagram
 
 **工作流要点：**
 
-| 步骤 | 检查内容 | 结果 |
-|------|----------|------|
-| 1 | enabled 是否为 true | false → 拒绝执行 |
-| 2 | 文件工具的路径是否在 user_directory 内 | 超出 → 拒绝执行 |
-| 3 | requires_confirmation 是否为 true | true → 弹出确认框 |
+```mermaid
+flowchart LR
+    subgraph STEP1["步骤1"]
+        S1["检查 enabled"]
+        S1R["false → 拒绝"]
+    end
+    
+    subgraph STEP2["步骤2"]
+        S2["检查目录范围"]
+        S2R["超出 → 拒绝"]
+    end
+    
+    subgraph STEP3["步骤3"]
+        S3["检查 confirmation"]
+        S3R["true → 确认框"]
+    end
+    
+    STEP1 -->|"enabled=true"| STEP2
+    STEP2 -->|"路径在范围内"| STEP3
+    
+    S1 --> S1R
+    S2 --> S2R
+    S3 --> S3R
+    
+    style S1R fill:#f66
+    style S2R fill:#f66
+    style S3R fill:#ff9
+```
 
 **目录范围检查示意：**
 
@@ -1415,21 +1445,28 @@ graph TB
     style DENIED fill:#f66
 ```
 
-**受目录限制的工具：**
+**工具分类（目录限制）：**
 
-| 工具 | 检查内容 |
-|------|----------|
-| Read | 检查读取的文件路径 |
-| Write | 检查写入的文件路径 |
-| Edit | 检查编辑的文件路径 |
-| Bash | 检查命令中的文件路径 |
-
-**不受目录限制的工具：**
-
-| 工具 | 原因 |
-|------|------|
-| WebSearch | 不涉及本地文件 |
-| WebFetch | 不涉及本地文件 |
+```mermaid
+graph LR
+    subgraph LIMITED["受目录限制"]
+        L1["Read<br/>检查文件路径"]
+        L2["Write<br/>检查文件路径"]
+        L3["Edit<br/>检查文件路径"]
+        L4["Bash<br/>检查命令中路径"]
+    end
+    
+    subgraph UNLIMITED["不受目录限制"]
+        U1["WebSearch<br/>不涉及文件"]
+        U2["WebFetch<br/>不涉及文件"]
+    end
+    
+    LIMITED --> CHECK_DIR["需要检查路径"]
+    UNLIMITED --> NO_CHECK["无需检查路径"]
+    
+    style LIMITED fill:#ff9
+    style UNLIMITED fill:#bfb
+```
 
 ---
 
