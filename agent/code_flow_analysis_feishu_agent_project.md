@@ -290,6 +290,467 @@ sequenceDiagram
     WsManager-->>API: 13. 重启成功
 ```
 
+### 3.5 子时序图 - 飞书卡片确认交互流程
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Feishu as 飞书平台
+    participant WsListener as ws_listener
+    participant WsManager as WebSocketManager
+    participant Callback as on_employee_message
+    participant Detect as detect_confirm_scenario
+    participant Flow as 确认流程管理
+    participant Card as 交互卡片
+    participant Session as CONFIRM_SESSIONS
+    participant Agent as FeishuAgent
+    
+    Note over User, Agent: 飞书卡片确认交互流程（如推流确认）
+    
+    User->>Feishu: 1. 发送 "推流" 消息
+    Feishu->>WsListener: 2. WebSocket 推送 im.message.receive_v1
+    WsListener->>WsManager: 3. 输出 JSON (employee_id, chat_id, content)
+    WsManager->>Callback: 4. 回调 on_employee_message()
+    
+    Callback->>Detect: 5. detect_confirm_scenario("推流")
+    Detect->>Detect: 6. 匹配 CONFIRM_SCENARIOS 关键词
+    Detect-->>Callback: 7. 返回 "推流确认"
+    
+    Note over Callback: 检测到确认流程<br/>不发送"正在处理"确认
+    
+    Callback->>Flow: 8. start_confirm_flow(chat_id, "推流确认")
+    Flow->>Session: 9. 初始化 CONFIRM_SESSIONS[chat_id]
+    Note over Session: scenario="推流确认"<br/>current_step=0<br/>user_choices={}
+    
+    Flow->>Card: 10. build_interactive_card(第一步)
+    Note over Card: 标题: 推流路径确认<br/>选项: test/mm_agent_tt, 自定义路径
+    
+    Flow->>Feishu: 11. send_interactive_card()
+    Feishu-->>User: 12. 显示交互卡片
+    
+    User->>Feishu: 13. 点击按钮选择
+    Feishu->>WsListener: 14. WebSocket 推送 card.action.trigger
+    Note over WsListener: action_tag: "button"<br/>action_value: {selected, step}
+    
+    WsListener->>WsManager: 15. 输出 JSON 回调事件
+    WsManager->>Callback: 16. 回调 on_employee_message()
+    Callback->>Callback: 17. 检测 event_type == "card.action.trigger"
+    
+    Callback->>Callback: 18. on_card_callback(data)
+    Callback->>Session: 19. 获取 CONFIRM_SESSIONS[chat_id]
+    Callback->>Flow: 20. continue_confirm_flow(chat_id, selected_value, step_name)
+    
+    Flow->>Session: 21. 记录 user_choices["rtsp_path"] = selected_value
+    Flow->>Flow: 22. 计算下一步索引 next_step
+    
+    alt 还有下一步
+        Flow->>Session: 23a. 更新 current_step = next_step
+        Flow->>Card: 24a. build_interactive_card(第二步)
+        Note over Card: 标题: 黑色片段时长<br/>选项: 20秒, 30秒, 60秒
+        Flow->>Feishu: 25a. send_interactive_card()
+        Feishu-->>User: 26a. 显示第二个卡片
+    else 流程完成
+        Flow->>Session: 23b. 获取所有 user_choices
+        Note over Flow: choices = {rtsp_path: "...", black_duration: "20"}
+        
+        Flow->>Flow: 24b. 构建 exec_prompt
+        Note over Flow: "使用 stream-push 技能执行推流<br/>参数：rtsp_path=..., black_duration=20"
+        
+        Flow->>Feishu: 25b. 发送执行提示 "开始执行..."
+        Flow->>Agent: 26b. agent.process(exec_prompt, context)
+        
+        Agent->>Agent: 27b. 执行 MCP 工具
+        Agent-->>Flow: 28b. 返回执行结果
+        
+        Flow->>Feishu: 29b. 发送执行结果
+        Feishu-->>User: 30b. 用户收到结果
+        
+        Flow->>Session: 31b. 清除 CONFIRM_SESSIONS[chat_id]
+    end
+```
+
+## 飞书卡片确认机制详解
+
+### 1. 确认场景定义 (CONFIRM_SCENARIOS)
+
+**位置**: `app/main.py:75-101`
+
+确认场景是预定义的操作流程，用于需要用户确认参数的敏感操作：
+
+```python
+CONFIRM_SCENARIOS = {
+    "推流确认": {
+        "trigger_keyword": ["推流", "帮我推流", "开始推流", "RTSP推流"],
+        "skill_name": "stream-push",  # 确认完成后执行的技能
+        "steps": [
+            {
+                "name": "rtsp_path",
+                "title": "推流路径确认",
+                "description": "请选择推流路径：",
+                "options": [
+                    {"label": "test/mm_agent_tt（推荐）", "value": "test/mm_agent_tt"},
+                    {"label": "自定义路径", "value": "custom"}
+                ]
+            },
+            {
+                "name": "black_duration",
+                "title": "黑色片段时长",
+                "description": "请选择黑色片段时长：",
+                "options": [
+                    {"label": "20秒（推荐）", "value": "20"},
+                    {"label": "30秒", "value": "30"},
+                    {"label": "60秒", "value": "60"}
+                ]
+            }
+        ]
+    }
+}
+```
+
+**场景结构说明**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| trigger_keyword | list | 触发关键词列表，用户消息匹配任一关键词触发确认流程 |
+| skill_name | str | 确认完成后执行的技能名称 |
+| steps | list | 确认步骤列表，每个步骤是一个参数选择 |
+
+**步骤结构说明**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| name | str | 步骤名称（用于存储用户选择） |
+| title | str | 卡片标题 |
+| description | str | 卡片描述文本 |
+| options | list | 选项列表，每个选项包含 label 和 value |
+
+### 2. 确认会话状态管理 (CONFIRM_SESSIONS)
+
+**位置**: `app/main.py:67`
+
+```python
+CONFIRM_SESSIONS = {}  # chat_id -> session 数据
+```
+
+Session 数据结构：
+
+```python
+{
+    "scenario": "推流确认",           # 场景名称
+    "current_step": 1,               # 当前步骤索引 (0, 1, 2...)
+    "user_choices": {                # 用户已做出的选择
+        "rtsp_path": "test/mm_agent_tt",
+        "black_duration": "20"
+    },
+    "employee_id": "xxx",            # 员工 ID
+    "app_id": "xxx",                 # 飞书 App ID（用于发送消息）
+    "app_secret": "xxx",             # 飞书 App Secret
+    "start_time": "2026-05-29T..."  # 开始时间
+}
+```
+
+### 3. 交互卡片 JSON 结构
+
+**位置**: `app/main.py:104-145`
+
+```python
+def build_interactive_card(title: str, description: str, options: list) -> dict:
+```
+
+生成的卡片 JSON：
+
+```json
+{
+    "config": {
+        "wide_screen_mode": true
+    },
+    "header": {
+        "title": {
+            "tag": "plain_text",
+            "content": "推流路径确认"
+        },
+        "template": "blue"
+    },
+    "elements": [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "请选择推流路径："
+            }
+        },
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "test/mm_agent_tt（推荐）"
+                    },
+                    "type": "primary",
+                    "value": {
+                        "selected": "test/mm_agent_tt",
+                        "step": "rtsp_path"
+                    }
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "自定义路径"
+                    },
+                    "type": "default",
+                    "value": {
+                        "selected": "custom",
+                        "step": "rtsp_path"
+                    }
+                }
+            ]
+        }
+    ]
+}
+```
+
+**关键字段说明**:
+
+| 字段 | 说明 |
+|------|------|
+| value.selected | 用户选择的值 |
+| value.step | 当前步骤名称（用于 continue_confirm_flow 判断） |
+| type: "primary" | 第一个按钮为主按钮（蓝色高亮） |
+| type: "default" | 其他按钮为默认样式 |
+
+### 4. 核心函数详解
+
+#### 4.1 detect_confirm_scenario()
+
+**位置**: `app/main.py:182-194`
+
+**功能**: 检测用户消息是否触发确认流程
+
+```python
+def detect_confirm_scenario(user_input: str) -> str:
+    user_input_lower = user_input.lower()
+    for scenario_name, scenario_config in CONFIRM_SCENARIOS.items():
+        for keyword in scenario_config["trigger_keywords"]:
+            if keyword.lower() in user_input_lower:
+                return scenario_name  # 返回匹配的场景名称
+    return None  # 未匹配返回 None
+```
+
+**输入输出**:
+
+| 参数 | 类型 | 方向 | 描述 |
+|------|------|------|------|
+| user_input | str | 输入 | 用户消息内容 |
+| scenario_name | str | 返回 | 匹配的场景名称（如 "推流确认"）或 None |
+
+#### 4.2 start_confirm_flow()
+
+**位置**: `app/main.py:197-236`
+
+**功能**: 开始确认流程，发送第一个交互卡片
+
+```python
+async def start_confirm_flow(chat_id, scenario_name, employee_id, app_id, app_secret):
+    scenario = CONFIRM_SCENARIOS.get(scenario_name)
+    first_step = scenario["steps"][0]
+    
+    # 初始化会话状态
+    CONFIRM_SESSIONS[chat_id] = {
+        "scenario": scenario_name,
+        "current_step": 0,
+        "user_choices": {},
+        "employee_id": employee_id,
+        "app_id": app_id,
+        "app_secret": app_secret,
+        "start_time": datetime.now().isoformat()
+    }
+    
+    # 构建并发送卡片
+    card = build_interactive_card(first_step["title"], first_step["description"], first_step["options"])
+    await send_interactive_card(chat_id, card, app_id, app_secret)
+```
+
+**输入输出**:
+
+| 参数 | 类型 | 方向 | 描述 |
+|------|------|------|------|
+| chat_id | str | 输入 | 聊天 ID |
+| scenario_name | str | 输入 | 场景名称 |
+| employee_id | str | 输入 | 员工 ID |
+| app_id | str | 输入 | 飞书 App ID |
+| app_secret | str | 输入 | 飞书 App Secret |
+
+#### 4.3 continue_confirm_flow()
+
+**位置**: `app/main.py:238-374`
+
+**功能**: 处理用户按钮点击，继续确认流程
+
+```python
+async def continue_confirm_flow(chat_id, selected_value, step_name):
+    session = CONFIRM_SESSIONS.get(chat_id)
+    scenario = CONFIRM_SCENARIOS[session["scenario"]]
+    
+    # 1. 记录用户选择
+    session["user_choices"][step_name] = selected_value
+    
+    # 2. 计算下一步索引
+    current_step = 找到 step_name 对应的索引
+    next_step = current_step + 1
+    
+    if next_step >= len(scenario["steps"]):
+        # 流程完成 - 执行技能
+        choices = session["user_choices"]
+        skill_name = scenario.get("skill_name", "")
+        
+        # 构建执行提示词
+        if skill_name == "stream-push":
+            exec_prompt = f"使用 stream-push 技能执行推流，参数：rtsp_path={choices['rtsp_path']}, black_duration={choices['black_duration']}"
+        
+        # 调用 Agent 执行
+        agent.process(exec_prompt, context)
+        
+        # 清除会话
+        CONFIRM_SESSIONS.pop(chat_id, None)
+    else:
+        # 发送下一个卡片
+        next_step_config = scenario["steps"][next_step]
+        card = build_interactive_card(...)
+        await send_interactive_card(chat_id, card, ...)
+```
+
+**输入输出**:
+
+| 参数 | 类型 | 方向 | 描述 |
+|------|------|------|------|
+| chat_id | str | 输入 | 聊天 ID |
+| selected_value | str | 输入 | 用户选择的值 |
+| step_name | str | 输入 | 当前步骤名称 |
+
+#### 4.4 on_card_callback()
+
+**位置**: `app/main.py:377-414`
+
+**功能**: 处理飞书卡片按钮点击回调
+
+```python
+async def on_card_callback(data: dict):
+    employee_id = data.get('employee_id')
+    chat_id = data.get('chat_id')
+    action_tag = data.get('action_tag')  # "button"
+    action_value = data.get('action_value', {})
+    selected_value = data.get('selected_value')
+    
+    # 检查是否有活跃的确认会话
+    session = CONFIRM_SESSIONS.get(chat_id)
+    
+    if session and action_tag == "button":
+        step_name = action_value.get("step", "")
+        await continue_confirm_flow(chat_id, selected_value, step_name)
+```
+
+**回调数据结构**:
+
+```python
+{
+    "event_type": "card.action.trigger",
+    "employee_id": "xxx",
+    "chat_id": "oc_xxx",
+    "user_open_id": "ou_xxx",
+    "message_id": "om_xxx",
+    "action_tag": "button",
+    "action_value": {
+        "selected": "test/mm_agent_tt",
+        "step": "rtsp_path"
+    },
+    "selected_value": "test/mm_agent_tt"
+}
+```
+
+### 5. 用户操作流程图
+
+```mermaid
+flowchart TD
+    A[用户发送: 推流] --> B{检测关键词}
+    B -->|匹配 推流| C[不发送正在处理确认]
+    B -->|未匹配| D[发送正在处理确认]
+    
+    C --> E[发送交互卡片]
+    E --> F[卡片: 推流路径确认]
+    F --> G[按钮: test/mm_agent_tt | 自定义路径]
+    
+    G --> H{用户点击按钮}
+    H -->|点击选项| I[飞书触发 card.action.trigger]
+    
+    I --> J[ws_listener 输出 JSON]
+    J --> K[WsManager 回调]
+    K --> L[on_card_callback]
+    
+    L --> M[记录 user_choices]
+    M --> N{还有下一步?}
+    
+    N -->|Yes| O[发送下一个卡片]
+    O --> P[卡片: 黑色片段时长]
+    P --> Q[按钮: 20秒 | 30秒 | 60秒]
+    Q --> H
+    
+    N -->|No| R[流程完成]
+    R --> S[构建 exec_prompt]
+    S --> T[调用 Agent 执行]
+    T --> U[发送执行结果]
+    U --> V[清除 CONFIRM_SESSIONS]
+```
+
+### 6. 与普通消息处理的对比
+
+| 场景 | 用户消息处理 | 卡片确认流程 |
+|------|-------------|-------------|
+| 触发条件 | 所有消息 | 匹配 CONFIRM_SCENARIOS 关键词 |
+| 快速确认 | 发送"正在处理..." | 不发送（直接发送卡片） |
+| 响应方式 | Agent 处理 → 发送结果 | 发送交互卡片 → 等待用户选择 |
+| 事件类型 | im.message.receive_v1 | card.action.trigger |
+| 状态管理 | Client Pool (session) | CONFIRM_SESSIONS |
+| 执行时机 | 收到消息后立即执行 | 所有步骤完成后执行 |
+
+### 7. ws_listener 卡片回调处理
+
+**位置**: `ws_listener.py:79-126`
+
+```python
+def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
+    operator = data.event.operator
+    action = data.event.action
+    context = data.event.context
+    
+    # 提取用户选择
+    selected_value = None
+    action_value = {}
+    
+    if action.tag == "button":
+        action_value = action.value or {}
+        selected_value = action_value.get("selected", "")
+    
+    # 构建回调事件数据
+    event_data = {
+        "event_type": "card.action.trigger",
+        "employee_id": employee_id,
+        "chat_id": context.open_chat_id,
+        "user_open_id": operator.open_id,
+        "action_tag": action.tag,
+        "action_value": action_value,
+        "selected_value": selected_value
+    }
+    
+    # 输出 JSON
+    print(json.dumps(event_data))
+    
+    # 返回 Toast 提示
+    return P2CardActionTriggerResponse(d={"toast": {"type": "success", "content": "已收到您的选择"}})
+```
+
 ## 完整调用树
 
 ```
