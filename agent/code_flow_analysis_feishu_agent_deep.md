@@ -28,83 +28,83 @@ flowchart TB
     end
     
     subgraph Feishu["飞书平台"]
-        F1["飞书 WebSocket"]
-        F2["飞书 API"]
+        F1["飞书 WebSocket<br/>EventDispatcherHandler"]
+        F2["飞书 API<br/>lark.Client"]
     end
     
     subgraph MainProcess["主进程 (FastAPI)"]
-        M1["AI诸葛亮 Agent"]
-        M2["WebSocketManager"]
-        M3["EmployeeCache"]
-        M4["MessageHandler"]
+        M1["AI诸葛亮 Agent<br/>FeishuAgent.initialize()<br/>FeishuAgent.process()"]
+        M2["WebSocketManager<br/>start_employee()<br/>_read_messages()"]
+        M3["EmployeeCache<br/>refresh()<br/>get_employee_prompt_section()"]
+        M4["MessageHandler<br/>handle()<br/>_send_message()"]
     end
     
-    subgraph SubProcess["子进程"]
-        S1["ws_listener.py<br/>AI诸葛亮"]
-        S2["ws_listener.py<br/>员工1"]
-        S3["ws_listener.py<br/>员工N"]
+    subgraph SubProcess["子进程 ws_listener.py"]
+        S1["AI诸葛亮进程<br/>do_p2p_im_message_receive_v1()<br/>_extract_content()"]
+        S2["员工1进程<br/>print(json.dumps(event_data))"]
+        S3["员工N进程<br/>do_p2_card_action_trigger()"]
     end
     
     subgraph SDK["Claude Agent SDK"]
-        C1["ClaudeSDKClient Pool"]
-        C2["MCP Server 连接"]
-        C3["Skills 加载"]
+        C1["ClaudeSDKClient Pool<br/>_get_or_create_client()<br/>_generate_session_uuid()"]
+        C2["MCP Server 连接<br/>ClaudeAgentOptions()<br/>mcp_servers参数"]
+        C3["Skills 加载<br/>SKILL.md读取<br/>skills参数"]
     end
     
-    subgraph MCP["MCP Server 集群"]
-        P1["analyticspolicy"]
-        P2["device"]
-        P3["person"]
-        P4["cognitive"]
-        P5["其他..."]
+    subgraph MCP["MCP Server 集群 HTTP"]
+        P1["analyticspolicy:8004<br/>policy_list()<br/>task_create()"]
+        P2["device:8006<br/>device_list()<br/>device_deactivate()"]
+        P3["person:8002<br/>person_page_list()"]
+        P4["cognitive:8008<br/>video_fetch_frame()"]
+        P5["其他MCP Server"]
     end
     
-    subgraph Database["数据库"]
-        D1["employees"]
-        D2["skills"]
-        D3["mcp_servers"]
+    subgraph Database["MySQL数据库"]
+        D1["employees表<br/>EmployeeCRUD.list()<br/>update_status()"]
+        D2["skills表<br/>SkillCRUD.get_by_name()"]
+        D3["mcp_servers表<br/>MCPServerCRUD.get_by_name()"]
     end
     
-    U1 --> F1
-    U2 --> F1
-    F1 --> S1
-    F1 --> S2
-    F1 --> S3
-    S1 --> M4
-    S2 --> M2
-    S3 --> M2
-    M4 --> M1
-    M2 --> M4
-    M1 --> C1
-    C1 --> C2
-    C2 --> P1
-    C2 --> P2
-    C2 --> P3
-    C2 --> P4
-    C1 --> C3
-    M3 --> D1
-    M3 --> D2
-    M3 --> D3
+    U1 -->|"发送消息"| F1
+    U2 -->|"@机器人"| F1
+    F1 -->|"WebSocket推送"| S1
+    F1 -->|"WebSocket推送"| S2
+    F1 -->|"WebSocket推送"| S3
+    S1 -->|"stdout管道"| M4
+    S2 -->|"stdout JSON"| M2
+    S3 -->|"stdout JSON"| M2
+    M4 -->|"agent.process()"| M1
+    M2 -->|"on_message回调"| M4
+    M1 -->|"client.query()"| C1
+    C1 -->|"HTTP POST"| C2
+    C2 -->|"mcp__server__tool"| P1
+    C2 -->|"mcp__device__*"| P2
+    C2 -->|"mcp__person__*"| P3
+    C2 -->|"mcp__cognitive__*"| P4
+    C1 -->|"加载skills"| C3
+    M3 -->|"SELECT"| D1
+    M3 -->|"SELECT"| D2
+    M3 -->|"SELECT"| D3
 ```
 
 ### 2. 生命周期流程图
 
 ```mermaid
 flowchart LR
-    A[run.py 启动] --> B[清理旧进程]
-    B --> C[启动 uvicorn]
-    C --> D[lifespan 初始化]
-    D --> E[初始化 WebSocketManager]
-    E --> F[刷新员工缓存]
-    F --> G[初始化 AI诸葛亮 Agent]
-    G --> H[初始化 MessageHandler]
-    H --> I[启动 WebSocket 监听]
-    I --> J[初始化员工 Agents]
-    J --> K[服务运行中]
-    K --> L[接收关闭信号]
-    L --> M[停止所有进程]
-    M --> N[断开 Client 连接]
-    N --> O[清理资源]
+    A["run.py::main()"] --> B|"cleanup_old_processes()"| B["清理旧进程"]
+    B -->|"uvicorn.Config()"| C["启动 uvicorn"]
+    C -->|"lifespan()"| D["FastAPI 生命周期"]
+    D -->|"WebSocketManager()"| E["初始化 WebSocketManager"]
+    E -->|"cache.refresh()"| F["刷新员工缓存<br/>EmployeeCRUD.list()"]
+    F -->|"FeishuAgent() + initialize()"| G["初始化 AI诸葛亮 Agent"]
+    G -->|"MessageHandler()"| H["初始化 MessageHandler"]
+    H -->|"FeishuWebSocketListener()<br/>+ start()"| I["启动 WebSocket 监听"]
+    I -->|"registry.create_agent()<br/>循环处理"| J["初始化员工 Agents"]
+    J -->|"asyncio.create_task()"| K["服务运行中<br/>定时刷新缓存"]
+    K -->|"收到 SIGTERM"| L["接收关闭信号"]
+    L -->|"ws_manager.stop_all()"| M["停止所有进程"]
+    M -->|"agent.disconnect_all()"| N["断开 Client 连接"]
+    N -->|"registry.remove_agent()"| O["清理资源"]
 ```
 
 ### 3. 时序图
@@ -127,25 +127,25 @@ sequenceDiagram
     User->>WS: 1. 发送飞书消息
     Note over WS: 群消息需@机器人<br/>私聊直接处理
     WS->>Listener: 2. 推送事件
-    Note over Listener: 解析消息内容<br/>提取mentions
-    Listener->>Handler: 3. JSON事件数据
-    Handler->>Handler: 4. 检查@提及
-    Handler->>Handler: 5. 发送表情确认
-    Handler->>Agent: 6. 调用process()
+    Note over Listener: do_p2p_im_message_receive_v1()<br/>_extract_content()<br/>_extract_mentions()
+    Listener->>Handler: 3. JSON事件数据<br/>print(json.dumps(event_data))
+    Handler->>Handler: 4. _is_bot_mentioned(event)<br/>检查@提及
+    Handler->>Handler: 5. _send_reaction(message_id)<br/>发送表情确认
+    Handler->>Agent: 6. agent.process(user_input, context)
     
-    Agent->>Cache: 7. 获取员工信息
-    Note over Cache: AI诸葛亮动态注入<br/>员工技能提示词
+    Agent->>Cache: 7. cache.get_employee_prompt_section()
+    Note over Cache: AI诸葛亮动态注入<br/>get_available_employees()
     Cache-->>Agent: 8. 员工信息段落
     
-    Agent->>SDK: 9. 获取/创建Client
-    Note over SDK: Client Pool机制<br/>每个chat_id独立Client
-    Agent->>SDK: 10. 发送query
-    SDK->>MCP: 11. 调用MCP工具
-    Note over MCP: HTTP方式调用<br/>执行业务操作
+    Agent->>SDK: 9. _get_or_create_client(chat_id)
+    Note over SDK: _generate_session_uuid()<br/>检查session文件<br/>ClaudeSDKClient(options)
+    Agent->>SDK: 10. await client.query(prompt)
+    SDK->>MCP: 11. 调用MCP工具<br/>mcp__{server}__{tool}
+    Note over MCP: HTTP POST到<br/>http://172.20.25.104:800X/mcp
     MCP-->>SDK: 12. 工具返回结果
-    SDK-->>Agent: 13. 响应消息流
-    Agent-->>Handler: 14. 响应文本
-    Handler->>WS: 15. 发送飞书回复
+    SDK-->>Agent: 13. client.receive_response()<br/>响应消息流
+    Agent-->>Handler: 14. response_text<br/>累加TextBlock内容
+    Handler->>WS: 15. _send_message(chat_id, text)<br/>CreateMessageRequest
     WS-->>User: 16. 显示回复
 ```
 
@@ -163,22 +163,22 @@ sequenceDiagram
     Note over WS,SDK: 员工独立进程处理
     
     WS->>Listener: 1. 消息事件
-    Listener->>Manager: 2. JSON到stdout
-    Note over Listener: stdout管道传递<br/>包含employee_id
-    Manager->>Manager: 3. 解析事件类型
+    Listener->>Manager: 2. print(json.dumps(event_data))<br/>到stdout管道
+    Note over Listener: do_p2p_im_message_receive_v1()<br/>_extract_content()
+    Manager->>Manager: 3. _parse_event(data)<br/>解析事件类型
     
-    alt 卡片回调事件
-        Manager->>Manager: 4a. 处理卡片回调
-        Manager->>Manager: 5a. 继续确认流程
-    else 消息事件
-        Manager->>Registry: 4b. 获取员工Agent
-        Registry-->>Manager: 5b. Agent实例
-        Manager->>Manager: 6b. 发送快速确认
-        Manager->>Agent: 7b. 调用process()
-        Agent->>SDK: 8b. 处理并调用MCP
-        SDK-->>Agent: 9b. 响应结果
-        Agent-->>Manager: 10b. 响应文本
-        Manager->>WS: 11b. 发送详细结果
+    alt 卡片回调事件 event_type=card.action.trigger
+        Manager->>Manager: 4a. on_card_callback(data)
+        Manager->>Manager: 5a. continue_confirm_flow()<br/>start_confirm_flow()
+    else 消息事件 event_type=im.message.receive_v1
+        Manager->>Registry: 4b. registry.get_agent(employee_id)
+        Registry-->>Manager: 5b. self._agents[employee_id]
+        Manager->>Manager: 6b. send_employee_message()<br/>发送快速确认
+        Manager->>Agent: 7b. agent.process(content, context)
+        Agent->>SDK: 8b. _get_or_create_client()<br/>client.query()
+        SDK-->>Agent: 9b. client.receive_response()<br/>响应结果
+        Agent-->>Manager: 10b. response_text
+        Manager->>WS: 11b. send_employee_message()<br/>CreateMessageRequest
     end
 ```
 
@@ -188,36 +188,36 @@ sequenceDiagram
 sequenceDiagram
     participant Main as main.py
     participant Agent as FeishuAgent
-    participant CRUD as MCPServerCRUD
-    participant Skill as SkillCRUD
+    participant CRUD as MCPServerCRUD<br/>SkillCRUD
     participant SDK as ClaudeAgentOptions
     participant Dir as 文件系统
     
-    Note over Main,Dir: FeishuAgent初始化流程
+    Note over Main,Dir: FeishuAgent.initialize() 流程
     
-    Main->>Agent: 1. 创建实例
-    Main->>Agent: 2. 调用initialize()
+    Main->>Agent: 1. FeishuAgent(employee_id, employee_config)
+    Main->>Agent: 2. await agent.initialize()
     
-    Agent->>CRUD: 3. 加载MCP Server
-    Note over CRUD: 从数据库读取<br/>员工绑定的MCP
-    CRUD-->>Agent: 4. MCP配置列表
+    Agent->>CRUD: 3. _load_mcp_servers()<br/>MCPServerCRUD.get_by_name()
+    Note over CRUD: SELECT * FROM mcp_servers<br/>WHERE name IN (employee.mcp_servers)
+    CRUD-->>Agent: 4. mcp_servers配置列表<br/>{"name": {"type":"http","url":"..."}}
     
-    Agent->>Agent: 5. 构建allowed_tools
-    Note over Agent: 自动获取所有MCP工具<br/>格式:mcp__server__tool
+    Agent->>Agent: 5. _build_allowed_tools()<br/>遍历mcp_servers
+    Note over Agent: 格式: mcp__{server}__{tool}<br/>例: mcp__device__device_list
     
-    Agent->>Skill: 6. 获取skill名称
-    Skill-->>Agent: 7. skill_names列表
+    Agent->>CRUD: 6. _get_skill_names()<br/>employee_config.get("skills")
+    CRUD-->>Agent: 7. skill_names列表<br/>["cleanup-mm-resources", "sfd-db"]
     
-    Agent->>Dir: 8. 创建员工目录
-    Note over Dir: .claude/skills/<br/>projects/(记忆)
+    Agent->>Dir: 8. 创建员工目录<br/>employee_skills/{employee_id}/.claude/
+    Note over Dir: mkdir(parents=True)<br/>skills/ + projects/
     
-    Agent->>Agent: 9. 构建系统提示词
-    Note over Agent: 基础提示词+工具说明<br/>+飞书说明+任务分配说明
+    Agent->>Agent: 9. _get_system_prompt()<br/>get_bot_profile("employee")
+    Note over Agent: 基础提示词+技能简介<br/>+工具权限说明+飞书发送说明
     
-    Agent->>SDK: 10. 构建ClaudeAgentOptions
-    Note over SDK: model/system_prompt<br/>mcp_servers/allowed_tools<br/>skills/env
+    Agent->>SDK: 10. ClaudeAgentOptions(
+    Note over SDK: model=settings.ANTHROPIC_MODEL<br/>system_prompt=full_prompt<br/>mcp_servers=mcp_servers<br/>allowed_tools=["Bash","Read"...]+mcp_tools<br/>cwd=employee_dir<br/>skills=skill_names<br/>env={"CLAUDE_CONFIG_DIR":...}
+    SDK-->>Agent: 返回options对象
     
-    Agent->>Agent: 11. 设置_initialized=True
+    Agent->>Agent: 11. self._initialized = True<br/>self._client_options = options
 ```
 
 #### 3.4 子时序图 - Client Pool 机制
@@ -225,38 +225,41 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Agent as FeishuAgent
-    participant UUID as uuid5生成
+    participant UUID as uuid.uuid5()
     participant Dir as projects目录
     participant SDK as ClaudeSDKClient
     
-    Note over Agent,SDK: 每个chat_id独立Client
+    Note over Agent,SDK: _get_or_create_client(chat_id)<br/>每个chat_id独立Client
     
-    Agent->>Agent: 1. process()调用
-    Agent->>Agent: 2. 检查_clients缓存
+    Agent->>Agent: 1. agent.process()调用
+    Agent->>Agent: 2. if chat_id in self._clients<br/>检查缓存
     
-    alt 已存在Client
-        Agent-->>SDK: 3a. 返回现有Client
-        Note over Agent: 直接使用<br/>恢复历史对话
+    alt 已存在Client self._clients[chat_id]
+        Agent-->>SDK: 3a. return self._clients[chat_id]
+        Note over Agent: 直接使用<br/>恢复历史对话记忆
     else 不存在Client
-        Agent->>UUID: 3b. 生成session_uuid
-        Note over UUID: employee_id+chat_id<br/>派生UUID
-        Agent->>Dir: 4b. 检查session文件
-        Note over Dir: projects/{cwd_hash}/{uuid}.jsonl
+        Agent->>UUID: 3b. _generate_session_uuid(chat_id)<br/>uuid.uuid5(SESSION_NAMESPACE,<br/>f"{employee_id}:{chat_id}")
+        Note over UUID: 派生固定UUID<br/>同一chat_id始终相同
+        Agent->>Dir: 4b. 检查session文件<br/>projects/{cwd_hash}/{uuid}.jsonl
+        Note over Dir: Path.exists()检查
         
-        alt session文件存在
-            Agent->>SDK: 5b-1. 使用resume参数
+        alt session文件存在 session_file.exists()
+            Agent->>SDK: 5b-1. ClaudeAgentOptions(<br/>resume=session_uuid)
             Note over SDK: 恢复已存在session<br/>保持历史记忆
         else session文件不存在
-            Agent->>SDK: 5b-2. 使用session_id参数
+            Agent->>SDK: 5b-2. ClaudeAgentOptions(<br/>session_id=session_uuid)
             Note over SDK: 创建新session<br/>开始新对话
         end
         
-        SDK-->>Agent: 6b. Client实例
-        Agent->>Agent: 7b. 存入_clients池
+        Agent->>SDK: 6b. ClaudeSDKClient(options=options)
+        Agent->>SDK: await client.connect()
+        SDK-->>Agent: 返回client实例
+        Agent->>Agent: 7b. self._clients[chat_id] = client<br/>存入缓存池
     end
     
-    Agent->>SDK: 8. 发送query
-    SDK-->>Agent: 9. 响应流
+    Agent->>SDK: 8. await client.query(prompt)<br/>发送请求
+    Agent->>Agent: 9. async for msg in client.receive_response()
+    Note over Agent: 处理AssistantMessage<br/>累加TextBlock内容
 ```
 
 ---
@@ -542,33 +545,33 @@ ws_client.start() [阻塞]
 ```mermaid
 flowchart LR
     subgraph Input["输入数据"]
-        I1["飞书消息<br/>JSON"]
-        I2["卡片回调<br/>action_value"]
+        I1["飞书消息JSON<br/>event.message.content"]
+        I2["卡片回调action_value<br/>action.selected_value"]
     end
     
-    subgraph Parse["解析层"]
-        P1["ws_listener.py<br/>事件解析"]
-        P2["FeishuWebSocketListener<br/>JSON解析"]
+    subgraph Parse["解析层 ws_listener.py"]
+        P1["do_p2p_im_message_receive_v1()<br/>_extract_content()<br/>json.loads(message.content)"]
+        P2["_parse_event()<br/>json.loads(stdout_line)<br/>FeishuMessageEvent/FeishuCardEvent"]
     end
     
     subgraph Process["处理层"]
-        PR1["MessageHandler<br/>消息预处理"]
-        PR2["FeishuAgent<br/>Agent处理"]
+        PR1["MessageHandler.handle()<br/>_is_bot_mentioned()<br/>_extract_user_input()<br/>_send_reaction()"]
+        PR2["FeishuAgent.process()<br/>cache.get_employee_prompt_section()<br/>_get_or_create_client()"]
     end
     
     subgraph SDK["SDK层"]
-        S1["ClaudeSDKClient<br/>LLM调用"]
-        S2["MCP Server<br/>工具调用"]
+        S1["ClaudeSDKClient.query()<br/>client.receive_response()<br/>TextBlock/ToolUseBlock"]
+        S2["MCP工具调用<br/>mcp__{server}__{tool}()<br/>HTTP POST到endpoint_url"]
     end
     
     subgraph Output["输出数据"]
-        O1["飞书回复<br/>文本/富文本"]
-        O2["MCP结果<br/>业务数据"]
+        O1["飞书回复<br/>_send_message()<br/>CreateMessageRequest<br/>msg_type:text/post"]
+        O2["MCP业务结果<br/>JSON响应<br/>业务系统执行"]
     end
     
-    I1 --> P1 --> P2 --> PR1 --> PR2 --> S1 --> S2 --> O2
-    S1 --> O1
-    I2 --> P1 --> P2 --> PR2
+    I1 -->|"WebSocket推送"| P1 -->|"print(json.dumps())"| P2 -->|"on_message回调"| PR1 -->|"agent.process()"| PR2 -->|"client.query()"| S1 -->|"ToolUseBlock"| S2 -->|"HTTP响应"| O2
+    S1 -->|"TextBlock累加"| O1
+    I2 -->|"card.action.trigger"| P1 -->|"on_card_callback"| PR2
 ```
 
 **数据流转详细说明**:
@@ -661,12 +664,11 @@ trigger_keyword: 触发关键词
 ### Skills 加载流程
 ```mermaid
 flowchart LR
-    A[数据库 skills 表] --> B[SkillCRUD.get_by_name]
-    B --> C[读取 content 字段]
-    C --> D[写入 SKILL.md]
-    D --> E[ClaudeAgentOptions.skills]
-    E --> F[SDK 加载 Skills]
-    F --> G[Agent 可调用 Skill 工具]
+    A["数据库 skills 表"] -->|"SkillCRUD.get_by_name(skill_name)"| B["读取 skill 记录<br/>SELECT * FROM skills<br/>WHERE name = skill_name"]
+    B -->|"skill.get('content')"| C["获取 content 字段<br/>description/trigger_keyword/content"]
+    C -->|"Path.write_text()"| D["写入 SKILL.md<br/>employee_skills/{id}/.claude/skills/{name}/SKILL.md"]
+    D -->|"ClaudeAgentOptions(skills=skill_names)"| E["SDK 加载 Skills<br/>setting_sources=['project']"]
+    E -->|"Skill 工具可用"| F["Agent 可调用技能<br/>Skill(skill_name)<br/>自动触发或手动调用"]
 ```
 
 ---
