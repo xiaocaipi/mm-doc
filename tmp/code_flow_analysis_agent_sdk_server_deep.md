@@ -923,6 +923,258 @@ erDiagram
 
 ---
 
+## Session 与 Memory 对比分析
+
+### 核心概念区别
+
+本代码实现了 **Session（会话）** 功能，但尚未实现 **Memory（记忆）** 功能。以下是两者的详细对比：
+
+| 特性 | Session（会话） | Memory（记忆） |
+|------|----------------|----------------|
+| **用途** | 多轮对话上下文管理 | 跨对话长期记忆存储 |
+| **生命周期** | 单次对话会话（可恢复） | 持久化，跨所有对话 |
+| **存储位置** | MySQL 数据库 | 文件系统（`.claude/*/memory/`） |
+| **数据类型** | 完整消息历史（user/assistant/tool） | 精炼的事实/偏好/项目信息 |
+| **触发方式** | `resume=session_id` | 自动加载到 system prompt |
+| **典型场景** | "继续之前的对话" | "记住用户喜欢中文" |
+| **比喻** | 📞 通话记录 | 📝 笔记本 |
+
+### Session 架构详解（已实现）
+
+Session 用于**短期记忆**，保存当前对话的完整上下文：
+
+```mermaid
+flowchart TB
+    subgraph SessionFlow["Session 流程"]
+        A["用户请求"] --> B{"检查 session_id"}
+        B -->|存在| C["get_session<br/>查询 MySQL"]
+        C --> D["is_resume = True<br/>恢复对话"]
+        B -->|不存在| E["创建新对话"]
+        D --> F["get_or_create_client<br/>复用 SDK Client"]
+        E --> F
+        F --> G["client.query<br/>发送消息"]
+        G --> H["receive_messages<br/>接收流"]
+        H --> I["save_message<br/>保存到 messages 表"]
+        I --> J["save_session<br/>更新 sessions 表"]
+    end
+
+    subgraph MySQL["MySQL 存储"]
+        S["sessions 表<br/>session_id, status"]
+        M["messages 表<br/>role, content, tool_*"]
+    end
+
+    J --> S
+    I --> M
+```
+
+**MySQL 表结构：**
+
+```mermaid
+erDiagram
+    SESSIONS ||--o{ MESSAGES : contains
+
+    SESSIONS {
+        string session_id PK "Session ID"
+        datetime created_at "创建时间"
+        datetime updated_at "更新时间"
+        int message_count "消息数量"
+        string last_message "最后消息"
+        string status "状态: active/closed"
+    }
+
+    MESSAGES {
+        int id PK "消息 ID"
+        string session_id FK "关联 Session"
+        string role "角色: user/assistant"
+        string content "文本内容"
+        string tool_name "工具名称"
+        string tool_input "工具输入 JSON"
+        string tool_result "工具结果"
+        datetime created_at "创建时间"
+    }
+```
+
+**Session 工作原理：**
+1. 用户发起对话时，生成或传入 `session_id`
+2. SDK 通过 `resume=session_id` 恢复对话上下文
+3. 所有消息（用户、助手、工具调用）保存到 MySQL
+4. 用户中断后可通过 `session_id` 继续对话
+
+### Memory 架构详解（未实现）
+
+Memory 用于**长期记忆**，跨对话保留关键信息：
+
+```mermaid
+flowchart TB
+    subgraph MemoryFlow["Memory 流程（Claude Code 标准）"]
+        A["新对话开始"] --> B["加载 MEMORY.md 索引"]
+        B --> C["读取所有 memory/*.md 文件"]
+        C --> D["注入到 system prompt"]
+        D --> E["Claude 可引用这些记忆"]
+        E --> F["对话结束"]
+        F --> G{"是否有新记忆"}
+        G -->|有| H["写入新 memory 文件"]
+        G -->|无| I["保持原样"]
+        H --> J["更新 MEMORY.md 索引"]
+    end
+
+    subgraph FileSystem["文件系统存储"]
+        MEM["memory/ 目录"]
+        IDX["MEMORY.md 索引"]
+        F1["user_preference.md"]
+        F2["project_config.md"]
+        F3["feedback_record.md"]
+    end
+
+    MEM --> IDX
+    MEM --> F1
+    MEM --> F2
+    MEM --> F3
+```
+
+**Memory 文件格式（Markdown + Frontmatter）：**
+
+```markdown
+---
+name: user-preference-chinese
+description: 用户偏好中文输出
+metadata:
+  type: user
+---
+
+用户偏好使用中文进行对话和输出。
+**Why:** 用户多次要求用中文解释技术概念。
+**How to apply:** 所有回复默认使用中文。
+相关记忆: [[project-mcp-config]]
+```
+
+**Memory 类型分类：**
+
+| 类型 | 用途 | 示例 |
+|------|------|------|
+| `user` | 用户信息 | "用户是后端开发工程师" |
+| `feedback` | 反馈指导 | "用户要求代码简洁" |
+| `project` | 项目信息 | "项目使用 MySQL 172.20.25.104" |
+| `reference` | 外部资源 | "API 文档 URL: xxx" |
+
+### Session 与 Memory 协同工作流程
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Claude as Claude Code
+    participant Memory as Memory 系统
+    participant Session as Session 系统
+    participant MySQL as MySQL
+
+    Note over User,MySQL: Session + Memory 协同工作
+
+    User->>Claude: 开始新对话
+    Claude->>Memory: 加载 MEMORY.md
+    Memory-->>Claude: 返回历史记忆
+    Note over Claude: Memory 注入 system prompt<br/>作为长期背景知识
+
+    User->>Claude: 发送消息
+    Claude->>Session: 创建新 session_id
+    Session->>MySQL: INSERT sessions
+    Note over Session: Session 开始记录<br/>本轮对话的完整历史
+
+    loop 对话过程
+        User->>Claude: 继续对话
+        Claude->>Session: save_message()
+        Session->>MySQL: INSERT messages
+    end
+
+    User->>Claude: 结束对话
+    Claude->>Session: save_session(done)
+    Note over Session: Session 结束<br/>但 Memory 依然存在
+
+    alt 用户有新偏好
+        Claude->>Memory: 写入新 memory 文件
+        Memory-->>Claude: 下次对话可用
+    end
+
+    Note over Claude: 下次对话时<br/>Session 是新的<br/>但 Memory 保留旧记忆
+```
+
+### 当前代码实现状态
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| **Session 创建** | ✅ 已实现 | `save_session()` 函数 |
+| **Session 查询** | ✅ 已实现 | `get_session()` 函数 |
+| **Session 列表** | ✅ 已实现 | `list_sessions()` 函数 |
+| **Session 删除** | ✅ 已实现 | `delete_session()` 函数 |
+| **消息保存** | ✅ 已实现 | `save_message()` 函数 |
+| **消息查询** | ✅ 已实现 | `get_messages()` 函数 |
+| **Client 连接池** | ✅ 已实现 | `CLIENT_POOL` 缓存 |
+| **SDK resume** | ✅ 已实现 | `ClaudeAgentOptions.resume=session_id` |
+| **Memory 加载** | ❌ 未实现 | 需要读取 memory 目录 |
+| **Memory 写入** | ❌ 未实现 | 需要提供写入 API |
+| **Memory 注入** | ❌ 未实现 | 需要注入到 system_prompt |
+
+### Memory 实现建议
+
+如果要添加 Memory 支持，需要以下改动：
+
+**1. 定义 Memory 目录**
+
+```python
+MEMORY_DIR = "/project/ai/agent/mcp/.claude/memory"
+MEMORY_INDEX = os.path.join(MEMORY_DIR, "MEMORY.md")
+```
+
+**2. 加载 Memory 函数**
+
+```python
+async def load_memories() -> str:
+    """加载所有 memory 文件内容"""
+    if not os.path.exists(MEMORY_INDEX):
+        return ""
+
+    memories = []
+    # 解析 MEMORY.md 索引，读取每个 memory 文件
+    # 返回合并后的内容字符串
+    return "\n\n".join(memories)
+```
+
+**3. 注入到 system_prompt**
+
+```python
+def get_agent_options(session_id=None):
+    memory_content = await load_memories()
+
+    return ClaudeAgentOptions(
+        system_prompt=f"""你是一个人脸解析任务管理专家。
+
+## 用户偏好和项目信息（Memory）
+
+{memory_content}
+
+请严格按照 Skills 定义的流程步骤调用工具。""",
+        # ...
+    )
+```
+
+**4. 提供 Memory API**
+
+```python
+async def memory_list_endpoint(request):
+    """列出所有 Memory"""
+    # 读取 MEMORY.md 索引
+
+async def memory_create_endpoint(request):
+    """创建新 Memory"""
+    # 写入新 memory 文件，更新索引
+```
+
+### 一句话总结
+
+> **Session** = 短期记忆（当前对话上下文，存储完整消息历史）
+> **Memory** = 长期记忆（跨对话知识积累，存储精炼的关键信息）
+
+---
+
 ## 关键决策点汇总
 
 | 位置 | 条件 | 结果 | 说明 |
