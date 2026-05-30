@@ -199,7 +199,7 @@ CREATE TABLE messages (
 sequenceDiagram
     participant User as 用户
     participant SDK as Claude SDK
-    participant Storage as 存储（JSONL/MySQL）
+    participant Storage as 存储
     participant Model as Claude 模型
 
     Note over User,Model: Session 创建与恢复流程
@@ -217,13 +217,11 @@ sequenceDiagram
     User->>SDK: 发送消息（session_id=abc123）
     SDK->>Storage: 查询 Session abc123
     Storage-->>SDK: 返回历史消息（50 条）
-    Note over SDK: 恢复对话上下文<br/>is_resume = True
+    Note over SDK: 恢复对话上下文，is_resume = True
     SDK->>Model: 历史消息 + 新消息
     Model-->>SDK: 返回响应（基于历史）
     SDK->>Storage: 保存新消息
     SDK-->>User: 返回响应（知道之前聊了什么）
-
-    style Storage fill:#bfb
 ```
 
 ### Session 恢复机制
@@ -431,9 +429,7 @@ sequenceDiagram
 
     Claude->>Storage: 写入新 memory 文件
     Claude->>Storage: 更新 MEMORY.md 索引
-    Note over Storage: 新记忆保存成功<br/>下次对话可用
-
-    style Storage fill:#f9f
+    Note over Storage: 新记忆保存成功，下次对话可用
 ```
 
 ### Memory 的注入方式
@@ -601,19 +597,19 @@ sequenceDiagram
     User->>SDK: 恢复 Session，发送消息
     SDK->>MySQL: 加载历史（200 条）
     MySQL-->>SDK: 返回完整消息
-    SDK->>Memory: 检查超限 → 压缩
-    Note over Memory: 压缩耗时 ~500ms
+    SDK->>Memory: 检查超限，触发压缩
+    Note over Memory: 压缩耗时约500ms
     Memory->>Model: 摘要 + 最近消息 + 新消息
     Model-->>SDK: 返回响应
-    Note over Memory: Context 释放<br/>压缩结果消失
+    Note over Memory: Context 释放，压缩结果消失
 
     Note over User,Model: 第 2 次请求（同一 Session）
 
     User->>SDK: 恢复 Session，发送消息
     SDK->>MySQL: 加载历史（201 条）
     MySQL-->>SDK: 返回完整消息
-    SDK->>Memory: 检查超限 → 又压缩
-    Note over Memory: 又压缩耗时 ~500ms<br/>重复工作！
+    SDK->>Memory: 检查超限，又触发压缩
+    Note over Memory: 又压缩耗时约500ms，重复工作
     Memory->>Model: 摘要 + 最近消息 + 新消息
 ```
 
@@ -632,20 +628,20 @@ sequenceDiagram
     User->>SDK: 恢复 Session，发送消息
     SDK->>JSONL: 加载历史
     JSONL-->>SDK: 摘要(compacted=true) + 最近消息
-    Note over SDK: 检查标记：已压缩<br/>跳过重复压缩！
+    Note over SDK: 检查标记：已压缩，跳过重复压缩
     SDK->>Memory: 直接使用已有摘要
-    Note over Memory: 耗时 ~10ms<br/>无需重新压缩
+    Note over Memory: 耗时约10ms，无需重新压缩
     Memory->>Model: 摘要 + 最近消息 + 新消息
     Model-->>SDK: 返回响应
     SDK->>JSONL: 保存新消息
-    Note over JSONL: 摘要不变<br/>只追加新消息
+    Note over JSONL: 摘要不变，只追加新消息
 
     Note over User,Model: 第 2 次请求
 
     User->>SDK: 恢复 Session
     SDK->>JSONL: 加载历史
     JSONL-->>SDK: 摘要(compacted=true) + 最近消息
-    Note over SDK: 又跳过压缩<br/>直接复用摘要
+    Note over SDK: 又跳过压缩，直接复用摘要
     SDK->>Model: 摘要 + 最近消息 + 新消息
 ```
 
@@ -777,7 +773,7 @@ sequenceDiagram
     participant Memory as Memory 系统
     participant Session as Session 系统
     participant Compaction as Compaction 系统
-    participant Storage as 存储（JSONL/MySQL）
+    participant Storage as 存储
     participant Model as Claude 模型
 
     Note over User,Model: 完整协同工作流程
@@ -823,10 +819,10 @@ sequenceDiagram
     Claude->>Session: 查询 Session abc123
     Session->>Storage: 加载历史
     Storage-->>Session: 摘要(compacted=true) + 最近消息
-    Note over Session: 检查标记：已压缩<br/>跳过重复压缩！
+    Note over Session: 检查标记：已压缩，跳过重复压缩
 
     Session-->>Claude: 直接使用已有摘要
-    Note over Claude: 无需重新压缩<br/>节省 ~500ms
+    Note over Claude: 无需重新压缩，节省约500ms
 
     User->>Claude: 发送新消息
     Claude->>Model: Memory + 摘要 + 最近消息 + 新消息
@@ -839,9 +835,9 @@ sequenceDiagram
     User->>Claude: 开始新对话（新 Session）
     Claude->>Memory: 加载 Memory
     Memory-->>Claude: 注入 system_prompt
-    Note over Claude: Memory 跨 Session 使用<br/>AI 依然知道用户偏好
+    Note over Claude: Memory 跨 Session 使用，AI 依然知道用户偏好
     Claude->>Session: 创建新 Session（新 session_id）
-    Note over Session: Session 是新的<br/>Memory 是旧的（跨 Session）
+    Note over Session: Session 是新的，Memory 是旧的（跨 Session）
 ```
 
 ### 数据流向图
