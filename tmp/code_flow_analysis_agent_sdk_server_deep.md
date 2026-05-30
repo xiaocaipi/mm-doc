@@ -923,210 +923,474 @@ erDiagram
 
 ---
 
-## Session 与 Memory 对比分析
+## Session、Memory、Compaction 三大概念详解
 
-### 核心概念区别
+本代码实现了 **Session（会话）** 功能，但尚未实现 **Memory（记忆）** 和 **Compaction（压缩）** 功能。
 
-本代码实现了 **Session（会话）** 功能，但尚未实现 **Memory（记忆）** 功能。以下是两者的详细对比：
+### 🎯 生活化比喻理解
 
-| 特性 | Session（会话） | Memory（记忆） |
-|------|----------------|----------------|
-| **用途** | 多轮对话上下文管理 | 跨对话长期记忆存储 |
-| **生命周期** | 单次对话会话（可恢复） | 持久化，跨所有对话 |
-| **存储位置** | MySQL 数据库 | 文件系统（`.claude/*/memory/`） |
-| **数据类型** | 完整消息历史（user/assistant/tool） | 精炼的事实/偏好/项目信息 |
-| **触发方式** | `resume=session_id` | 自动加载到 system prompt |
-| **典型场景** | "继续之前的对话" | "记住用户喜欢中文" |
-| **比喻** | 📞 通话记录 | 📝 笔记本 |
+| 概念 | 生活比喻 | 本质 | 存什么 | 存多久 |
+|------|---------|------|--------|--------|
+| **Session（会话）** | 📞 **一次电话通话** | 当前对话的完整记录 | 逐条消息（你说一句、我回一句） | 短期（几天） |
+| **Memory（记忆）** | 📝 **笔记本** | 长期记住的重要信息 | 精炼的关键信息（用户偏好、项目配置） | 长期（永久） |
+| **Compaction（压缩）** | 🗜️ **通话记录摘要** | 长对话精简为关键点 | 旧消息的摘要（保留最近，压缩旧的） | 临时（压缩时） |
 
-### Session 架构详解（已实现）
+---
 
-Session 用于**短期记忆**，保存当前对话的完整上下文：
+### 📞 Session（会话）- "一次电话通话"
+
+#### 生活场景
+
+> 你和朋友打电话聊天，聊了很久。如果电话断了，你想**继续刚才的话题**，就需要知道之前说了什么。
+> 
+> 这就是 Session：**完整记录这次电话说了什么**。
+
+#### 实际例子
+
+```mermaid
+flowchart LR
+    subgraph "一次 Session 对话"
+        A["用户说: 帮我创建人脸解析任务"] --> B["AI: 好的，调用 createTask 工具"]
+        B --> C["工具返回: 任务创建成功，ID=123"]
+        C --> D["AI: 任务 123 已创建"]
+        D --> E["用户说: 查看任务状态"]
+        E --> F["AI: 调用 getTaskStatus"]
+        F --> G["工具返回: 正在运行"]
+        G --> H["AI: 任务正在运行"]
+    end
+
+    I["⚠️ 对话中断"] --> J["下次继续"]
+    J --> K["传入 session_id=xxx"]
+    K --> L["AI 恢复上下文<br/>知道之前聊了任务 123"]
+    L --> M["用户: 那个任务现在怎样了"]
+    M --> N["AI: 任务 123 正在运行"]
+```
+
+#### Session 存储内容（MySQL）
+
+```
+messages 表记录：
+┌─────────────────────────────────────────────────────────────┐
+│ 第 1 条: user      │ "帮我创建人脸解析任务"                    │
+│ 第 2 条: assistant │ tool_name=createTask, input={...}       │
+│ 第 3 条: user      │ tool_result="任务创建成功，ID=123"        │
+│ 第 4 条: assistant │ "任务 123 已创建"                        │
+│ 第 5 条: user      │ "查看任务状态"                           │
+│ 第 6 条: assistant │ tool_name=getTaskStatus, input={id:123} │
+│ 第 7 条: user      │ tool_result="正在运行"                   │
+│ 第 8 条: assistant │ "任务正在运行"                           │
+└─────────────────────────────────────────────────────────────┘
+
+特点：逐条记录，完整保存每一句话、每个工具调用、每个返回结果
+```
+
+#### Session 工作流程
 
 ```mermaid
 flowchart TB
     subgraph SessionFlow["Session 流程"]
-        A["用户请求"] --> B{"检查 session_id"}
-        B -->|存在| C["get_session<br/>查询 MySQL"]
-        C --> D["is_resume = True<br/>恢复对话"]
-        B -->|不存在| E["创建新对话"]
-        D --> F["get_or_create_client<br/>复用 SDK Client"]
-        E --> F
-        F --> G["client.query<br/>发送消息"]
-        G --> H["receive_messages<br/>接收流"]
-        H --> I["save_message<br/>保存到 messages 表"]
-        I --> J["save_session<br/>更新 sessions 表"]
+        A["用户发起对话"] --> B{"有 session_id 吗"}
+        B -->|有| C["查询 MySQL<br/>get_session"]
+        C --> D["Session 存在"]
+        D --> E["is_resume = True<br/>恢复对话上下文"]
+        B -->|无| F["创建新对话"]
+        F --> G["生成新 session_id"]
+        E --> H["get_or_create_client<br/>SDK resume=session_id"]
+        G --> H
+        H --> I["client.query(message)<br/>发送消息"]
+        I --> J["receive_messages<br/>接收 AI 响应流"]
+        J --> K["save_message()<br/>保存到 MySQL"]
+        K --> L["对话结束"]
+        L --> M["save_session()<br/>更新 Session 状态"]
     end
-
-    subgraph MySQL["MySQL 存储"]
-        S["sessions 表<br/>session_id, status"]
-        M["messages 表<br/>role, content, tool_*"]
-    end
-
-    J --> S
-    I --> M
 ```
 
-**MySQL 表结构：**
+#### Session 关键点
 
-```mermaid
-erDiagram
-    SESSIONS ||--o{ MESSAGES : contains
+| 问题 | 答案 |
+|------|------|
+| **什么时候用？** | 用户说"继续上次的对话"，传入 `session_id` |
+| **存什么？** | 完整对话历史（用户消息、AI 响应、工具调用、返回结果） |
+| **存哪里？** | MySQL 数据库（sessions 表 + messages 表） |
+| **怎么恢复？** | SDK 通过 `ClaudeAgentOptions.resume=session_id` 自动恢复 |
 
-    SESSIONS {
-        string session_id PK "Session ID"
-        datetime created_at "创建时间"
-        datetime updated_at "更新时间"
-        int message_count "消息数量"
-        string last_message "最后消息"
-        string status "状态: active/closed"
-    }
+---
 
-    MESSAGES {
-        int id PK "消息 ID"
-        string session_id FK "关联 Session"
-        string role "角色: user/assistant"
-        string content "文本内容"
-        string tool_name "工具名称"
-        string tool_input "工具输入 JSON"
-        string tool_result "工具结果"
-        datetime created_at "创建时间"
-    }
-```
+### 📝 Memory（记忆）- "笔记本"
 
-**Session 工作原理：**
-1. 用户发起对话时，生成或传入 `session_id`
-2. SDK 通过 `resume=session_id` 恢复对话上下文
-3. 所有消息（用户、助手、工具调用）保存到 MySQL
-4. 用户中断后可通过 `session_id` 继续对话
+#### 生活场景
 
-### Memory 架构详解（未实现）
+> 你有个笔记本，专门记录**重要的事情**：
+> - 朋友的生日
+> - 常用的密码
+> - 喜欢的餐厅
+> 
+> 每次遇到新问题，你会**翻开笔记本**看看以前记录的信息。
+> 
+> 这就是 Memory：**长期保存的关键信息，跨所有对话使用**。
 
-Memory 用于**长期记忆**，跨对话保留关键信息：
+#### 实际例子
 
 ```mermaid
 flowchart TB
-    subgraph MemoryFlow["Memory 流程（Claude Code 标准）"]
-        A["新对话开始"] --> B["加载 MEMORY.md 索引"]
-        B --> C["读取所有 memory/*.md 文件"]
-        C --> D["注入到 system prompt"]
-        D --> E["Claude 可引用这些记忆"]
-        E --> F["对话结束"]
-        F --> G{"是否有新记忆"}
-        G -->|有| H["写入新 memory 文件"]
-        G -->|无| I["保持原样"]
-        H --> J["更新 MEMORY.md 索引"]
+    subgraph Memory["笔记本里的内容（精炼的关键信息）"]
+        M1["📌 用户是后端工程师<br/>熟悉 Python 和 Docker"]
+        M2["📌 项目用 MySQL 172.20.25.104<br/>数据库 mcp_test"]
+        M3["📌 用户喜欢简洁代码<br/>不喜欢太长的解释"]
+        M4["📌 任务 ID 必须是字符串类型<br/>不能用数字"]
     end
 
-    subgraph FileSystem["文件系统存储"]
-        MEM["memory/ 目录"]
-        IDX["MEMORY.md 索引"]
-        F1["user_preference.md"]
-        F2["project_config.md"]
-        F3["feedback_record.md"]
-    end
+    A["第 1 天对话"] --> B["翻开笔记本<br/>加载 Memory"]
+    B --> C["AI 知道用户偏好"]
+    C --> D["对话时参考这些记忆"]
 
-    MEM --> IDX
-    MEM --> F1
-    MEM --> F2
-    MEM --> F3
+    E["第 2 天对话<br/>（新 Session）"] --> F["翻开笔记本<br/>加载 Memory"]
+    F --> G["AI 依然知道用户偏好"]
+
+    H["第 3 天对话<br/>（又是新 Session）"] --> I["翻开笔记本<br/>加载 Memory"]
+    I --> J["AI 还是知道用户偏好"]
+
+    style Memory fill:#f9f
 ```
 
-**Memory 文件格式（Markdown + Frontmatter）：**
+#### Memory 文件格式（Markdown）
 
 ```markdown
 ---
-name: user-preference-chinese
-description: 用户偏好中文输出
+name: user-preference-code-style
+description: 用户偏好简洁代码
 metadata:
-  type: user
+  type: feedback
 ---
 
-用户偏好使用中文进行对话和输出。
-**Why:** 用户多次要求用中文解释技术概念。
-**How to apply:** 所有回复默认使用中文。
-相关记忆: [[project-mcp-config]]
+用户偏好：
+- 代码要简洁，不要冗余
+- 使用中文回答
+- 不喜欢太长的解释，直接给结论
+
+**Why:** 用户多次反馈说"太长了"、"简洁点"
+**How to apply:** 回复时先给结论，再给代码，不要长篇大论
+
+相关记忆: [[user-background]], [[project-config]]
 ```
 
-**Memory 类型分类：**
+#### Memory 类型分类
 
 | 类型 | 用途 | 示例 |
 |------|------|------|
-| `user` | 用户信息 | "用户是后端开发工程师" |
-| `feedback` | 反馈指导 | "用户要求代码简洁" |
-| `project` | 项目信息 | "项目使用 MySQL 172.20.25.104" |
+| `user` | 用户是谁 | "用户是后端工程师，熟悉 Python" |
+| `feedback` | 用户偏好 | "用户喜欢简洁代码" |
+| `project` | 项目配置 | "项目用 MySQL 172.20.25.104" |
 | `reference` | 外部资源 | "API 文档 URL: xxx" |
 
-### Session 与 Memory 协同工作流程
+#### Memory 工作流程
+
+```mermaid
+flowchart TB
+    subgraph MemoryFlow["Memory 流程"]
+        A["新对话开始"] --> B["读取 MEMORY.md 索引"]
+        B --> C["加载所有 memory/*.md 文件"]
+        C --> D["合并成一段文字"]
+        D --> E["注入到 system_prompt"]
+        E --> F["AI 知道这些背景信息"]
+        F --> G["对话进行"]
+        G --> H["发现新的重要信息"]
+        H --> I["写入新 memory 文件"]
+        I --> J["更新 MEMORY.md 索引"]
+        J --> K["下次对话可用"]
+    end
+
+    subgraph Files["文件系统"]
+        DIR["memory/ 目录"]
+        IDX["MEMORY.md<br/>索引文件"]
+        F1["user_background.md"]
+        F2["project_config.md"]
+        F3["code_style.md"]
+    end
+
+    DIR --> IDX
+    DIR --> F1
+    DIR --> F2
+    DIR --> F3
+```
+
+#### Memory 关键点
+
+| 问题 | 答案 |
+|------|------|
+| **什么时候用？** | 每次对话开始时自动加载 |
+| **存什么？** | 精炼的关键信息（不是完整对话） |
+| **存哪里？** | Markdown 文件（`.claude/memory/` 目录） |
+| **怎么生效？** | 注入到 `system_prompt`，AI 自动参考 |
+
+---
+
+### 🗜️ Compaction（压缩）- "通话记录摘要"
+
+#### 生活场景
+
+> 你和客户打了 **3 小时电话**，聊了 **100 个话题**。
+> 
+> 如果要给别人复述，你**不能逐字逐句说**，只能**总结要点**：
+> - "前半段讨论了项目方案"
+> - "中间讨论了预算问题"
+> - "最后确定了时间表"
+> 
+> 这就是 Compaction：**长对话精简为摘要，保留关键信息**。
+
+#### 为什么需要压缩？
+
+```mermaid
+flowchart TB
+    A["对话进行中"] --> B["消息越来越多"]
+    B --> C["第 1 条 → 第 50 条 → 第 100 条 → 第 200 条"]
+    C --> D{"Context 是否超限"}
+    D -->|未超限| E["继续正常对话"]
+    D -->|超限| F["⚠️ 触发压缩"]
+
+    F --> G["保留最近 N 条消息<br/>（完整保存）"]
+    G --> H["旧消息压缩成摘要<br/>（不丢失关键信息）"]
+    H --> I["摘要 + 最近消息<br/>= 新的 Context"]
+
+    subgraph Before["压缩前（200 条）"]
+        B1["消息 1-150: 讨论 A、B、C"]
+        B2["消息 151-200: 讨论最终方案"]
+    end
+
+    subgraph After["压缩后（50 条 + 摘要）"]
+        A1["摘要: 前面讨论了 A、B、C<br/>结论是 xxx"]
+        A2["消息 151-200: 完整保留"]
+    end
+
+    style F fill:#f66
+```
+
+#### 压缩过程详解
+
+```
+压缩前 Context（太长）：
+┌─────────────────────────────────────────────────────────────┐
+│ 消息 1:   用户问问题 A                                      │
+│ 消息 2:   AI 回答 A                                         │
+│ 消息 3:   用户追问 A1                                       │
+│ 消息 4:   AI 回答 A1                                        │
+│ ...                                                         │
+│ 消息 100: 用户问问题 B                                      │
+│ 消息 101: AI 回答 B                                         │
+│ ...                                                         │
+│ 消息 198: 用户问最终方案                                    │
+│ 消息 199: AI 回答方案                                       │
+│ 消息 200: 用户确认                                          │
+└─────────────────────────────────────────────────────────────┘
+总计：200 条消息，约 50000 tokens
+
+压缩后 Context（精简）：
+┌─────────────────────────────────────────────────────────────┐
+│ [摘要] 前 150 条消息主要讨论：                              │
+│ - 问题 A 的解决方案是 xxx                                   │
+│ - 问题 B 的结论是 yyy                                       │
+│ - 中间尝试了方法 zzz                                        │
+│                                                             │
+│ 消息 151: 用户问 C                                          │
+│ 消息 152: AI 回答 C                                         │
+│ ...                                                         │
+│ 消息 198: 用户问最终方案                                    │
+│ 消息 199: AI 回答方案                                       │
+│ 消息 200: 用户确认                                          │
+└─────────────────────────────────────────────────────────────┘
+总计：摘要 + 50 条最近消息，约 10000 tokens
+```
+
+#### Compaction 关键点
+
+| 问题 | 答案 |
+|------|------|
+| **什么时候触发？** | 对话消息超过限制（如 200 条或 tokens 超限） |
+| **谁来触发？** | **系统自动**（SDK 内部处理） |
+| **压缩什么？** | 旧消息压缩成摘要，最近消息完整保留 |
+| **会丢失信息吗？** | 不会，关键信息保留在摘要中 |
+
+---
+
+### 🔄 三者的协同关系
+
+```mermaid
+flowchart TB
+    subgraph Timeline["时间线"]
+        T1["第 1 天"] --> T2["第 2 天"] --> T3["第 3 天"] --> T4["第 N 天"]
+    end
+
+    subgraph Memory["Memory - 永久保存（笔记本）"]
+        M["📌 用户偏好<br/>📌 项目配置<br/>📌 重要经验<br/>📌 反馈记录"]
+    end
+
+    subgraph Day1["第 1 天 Session"]
+        S1["完整对话<br/>200 条消息"]
+        C1["对话太长<br/>触发压缩"]
+        C1 --> S1C["摘要 + 最近消息"]
+    end
+
+    subgraph Day2["第 2 天 Session"]
+        S2["完整对话<br/>150 条消息"]
+    end
+
+    subgraph Day3["第 3 天 Session"]
+        S3["完整对话<br/>新 Session"]
+    end
+
+    T1 --> S1
+    S1 -->|"消息 > 200"| C1
+    T2 --> S2
+    T3 --> S3
+
+    M -.->|"每次对话注入"| S1
+    M -.->|"每次对话注入"| S2
+    M -.->|"每次对话注入"| S3
+
+    style M fill:#f9f
+    style S1 fill:#bbf
+    style S2 fill:#bbf
+    style S3 fill:#bbf
+    style C1 fill:#f66
+```
+
+#### 三者协同工作时序
 
 ```mermaid
 sequenceDiagram
     participant User as 用户
-    participant Claude as Claude Code
+    participant Claude as AI/SDK
     participant Memory as Memory 系统
     participant Session as Session 系统
+    participant Compaction as 压缩系统
     participant MySQL as MySQL
 
-    Note over User,MySQL: Session + Memory 协同工作
+    Note over User,MySQL: 三者协同工作完整流程
 
-    User->>Claude: 开始新对话
-    Claude->>Memory: 加载 MEMORY.md
-    Memory-->>Claude: 返回历史记忆
-    Note over Claude: Memory 注入 system prompt<br/>作为长期背景知识
+    User->>Claude: 第 1 天开始对话
+    Claude->>Memory: 加载笔记本（Memory）
+    Memory-->>Claude: 返回用户偏好、项目配置
+    Note over Claude: Memory 注入 system_prompt<br/>AI 知道用户背景
 
-    User->>Claude: 发送消息
-    Claude->>Session: 创建新 session_id
-    Session->>MySQL: INSERT sessions
-    Note over Session: Session 开始记录<br/>本轮对话的完整历史
+    Claude->>Session: 创建新 Session
+    Session->>MySQL: INSERT sessions (session_id=xxx)
+    Note over Session: Session 开始记录本轮对话
 
-    loop 对话过程
-        User->>Claude: 继续对话
+    loop 对话进行（消息累积）
+        User->>Claude: 发送消息
         Claude->>Session: save_message()
         Session->>MySQL: INSERT messages
     end
 
+    Note over Claude: 消息达到 150 条
+
+    Claude->>Compaction: 检查是否需要压缩
+    Compaction-->>Claude: 未超限，继续
+
+    Note over Claude: 消息达到 200 条
+
+    Claude->>Compaction: 触发压缩
+    Compaction->>Compaction: 保留最近 50 条
+    Compaction->>Compaction: 旧消息压缩成摘要
+    Compaction-->>Claude: 返回压缩后的 Context
+    Note over Compaction: 压缩完成<br/>Context 精简
+
     User->>Claude: 结束对话
     Claude->>Session: save_session(done)
-    Note over Session: Session 结束<br/>但 Memory 依然存在
+    Note over Session: Session 结束
 
-    alt 用户有新偏好
-        Claude->>Memory: 写入新 memory 文件
+    alt 发现新的重要信息
+        Claude->>Memory: 写入新 memory
         Memory-->>Claude: 下次对话可用
     end
 
-    Note over Claude: 下次对话时<br/>Session 是新的<br/>但 Memory 保留旧记忆
+    Note over Claude: 第 2 天开始新对话
+    User->>Claude: 第 2 天开始对话
+    Claude->>Memory: 加载笔记本（Memory）
+    Memory-->>Claude: 返回用户偏好（包含新记忆）
+    Claude->>Session: 创建新 Session（新的 session_id）
+    Note over Claude: Memory 跨 Session 使用<br/>Session 是新的
 ```
+
+---
+
+### 📊 三大概念对比总表
+
+| | Session（会话） | Memory（记忆） | Compaction（压缩） |
+|---|----------------|----------------|-------------------|
+| **比喻** | 📞 电话通话记录 | 📝 笔记本 | 🗜️ 通话摘要 |
+| **存什么** | 完整对话（逐条消息） | 精炼的关键信息 | 旧消息的摘要 |
+| **存多久** | 短期（几天） | 长期（永久） | 临时（压缩时） |
+| **什么时候用** | 继续当前对话 | 每次对话都参考 | 对话太长时自动触发 |
+| **谁来触发** | 用户传 session_id | 系统自动加载 | 系统自动判断 |
+| **存储位置** | MySQL 数据库 | Markdown 文件 | 内存/Context |
+| **是否跨对话** | ❌ 仅当前对话 | ✅ 跨所有对话 | ❌ 仅当前对话 |
+| **当前实现状态** | ✅ 已实现 | ❌ 未实现 | ❌ SDK 内部处理 |
+
+---
+
+### 🤔 常见问题解答
+
+#### Q1: Session 和 Memory 有什么区别？
+
+**Session**: "刚才我们聊了任务 123 的创建过程，任务正在运行"（具体对话内容）
+**Memory**: "用户喜欢简洁代码，项目用 MySQL 172.20.25.104"（长期偏好和配置）
+
+#### Q2: 什么时候用 Session？
+
+用户说"**继续上次的对话**"，传入 `session_id`，恢复上下文。
+场景：用户中断对话后想继续。
+
+#### Q3: 什么时候用 Memory？
+
+**每次对话开始时自动加载**，AI 知道用户的偏好和项目配置。
+场景：AI 自动记住用户喜欢中文回答、项目配置等信息。
+
+#### Q4: 什么时候触发压缩？
+
+对话消息超过 **200 条** 或 **Context tokens 超限**时，系统自动压缩。
+场景：长时间对话，历史消息太多。
+
+#### Q5: 压缩会丢失信息吗？
+
+**不会**。关键信息保留在摘要中，最近消息完整保留。
+
+#### Q6: Memory 和 Session 能同时用吗？
+
+**能**。每次对话开始：
+1. 加载 Memory（注入 system_prompt）
+2. 创建或恢复 Session（记录对话）
+3. Memory 跨所有 Session 使用
+
+---
 
 ### 当前代码实现状态
 
-| 功能 | 状态 | 说明 |
-|------|------|------|
-| **Session 创建** | ✅ 已实现 | `save_session()` 函数 |
-| **Session 查询** | ✅ 已实现 | `get_session()` 函数 |
-| **Session 列表** | ✅ 已实现 | `list_sessions()` 函数 |
-| **Session 删除** | ✅ 已实现 | `delete_session()` 函数 |
-| **消息保存** | ✅ 已实现 | `save_message()` 函数 |
-| **消息查询** | ✅ 已实现 | `get_messages()` 函数 |
-| **Client 连接池** | ✅ 已实现 | `CLIENT_POOL` 缓存 |
-| **SDK resume** | ✅ 已实现 | `ClaudeAgentOptions.resume=session_id` |
-| **Memory 加载** | ❌ 未实现 | 需要读取 memory 目录 |
-| **Memory 写入** | ❌ 未实现 | 需要提供写入 API |
-| **Memory 注入** | ❌ 未实现 | 需要注入到 system_prompt |
+| 功能 | 状态 | 实现位置 | 说明 |
+|------|------|----------|------|
+| **Session 创建** | ✅ 已实现 | `save_session()` | MySQL INSERT sessions |
+| **Session 查询** | ✅ 已实现 | `get_session()` | MySQL SELECT sessions |
+| **Session 恢复** | ✅ 已实现 | `ClaudeAgentOptions.resume` | SDK 自动处理 |
+| **消息保存** | ✅ 已实现 | `save_message()` | MySQL INSERT messages |
+| **消息查询** | ✅ 已实现 | `get_messages()` | MySQL SELECT messages |
+| **Client 连接池** | ✅ 已实现 | `CLIENT_POOL` | 缓存复用 Client |
+| **Memory 加载** | ❌ 未实现 | - | 需读取 memory 目录 |
+| **Memory 写入** | ❌ 未实现 | - | 需提供写入 API |
+| **Memory 注入** | ❌ 未实现 | - | 需注入到 system_prompt |
+| **Compaction** | ❌ SDK 内部 | - | SDK 自动处理，无需实现 |
+
+---
 
 ### Memory 实现建议
 
-如果要添加 Memory 支持，需要以下改动：
-
-**1. 定义 Memory 目录**
+如需添加 Memory 支持，参考以下代码：
 
 ```python
+# 1. 定义 Memory 目录
 MEMORY_DIR = "/project/ai/agent/mcp/.claude/memory"
 MEMORY_INDEX = os.path.join(MEMORY_DIR, "MEMORY.md")
-```
 
-**2. 加载 Memory 函数**
-
-```python
+# 2. 加载 Memory 函数
 async def load_memories() -> str:
     """加载所有 memory 文件内容"""
     if not os.path.exists(MEMORY_INDEX):
@@ -1136,11 +1400,8 @@ async def load_memories() -> str:
     # 解析 MEMORY.md 索引，读取每个 memory 文件
     # 返回合并后的内容字符串
     return "\n\n".join(memories)
-```
 
-**3. 注入到 system_prompt**
-
-```python
+# 3. 注入到 system_prompt
 def get_agent_options(session_id=None):
     memory_content = await load_memories()
 
@@ -1154,11 +1415,8 @@ def get_agent_options(session_id=None):
 请严格按照 Skills 定义的流程步骤调用工具。""",
         # ...
     )
-```
 
-**4. 提供 Memory API**
-
-```python
+# 4. 提供 Memory API
 async def memory_list_endpoint(request):
     """列出所有 Memory"""
     # 读取 MEMORY.md 索引
@@ -1168,10 +1426,15 @@ async def memory_create_endpoint(request):
     # 写入新 memory 文件，更新索引
 ```
 
+---
+
 ### 一句话总结
 
-> **Session** = 短期记忆（当前对话上下文，存储完整消息历史）
-> **Memory** = 长期记忆（跨对话知识积累，存储精炼的关键信息）
+| 概念 | 一句话总结 |
+|------|-----------|
+| **Session** | 短期记忆，保存当前对话的完整消息历史，用于"继续上次对话" |
+| **Memory** | 长期记忆，保存精炼的关键信息，每次对话都参考，跨 Session 使用 |
+| **Compaction** | 自动压缩，长对话精简为摘要，保留关键信息，避免 Context 爆炸 |
 
 ---
 
