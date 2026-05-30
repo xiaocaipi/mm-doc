@@ -336,10 +336,11 @@ flowchart TB
     style S1 fill:#bbf
     style S2 fill:#bbf
     style S3 fill:#bbf
-
-    Note1["Session 是独立的<br/>每次新对话"]
-    Note2["Memory 跨 Session<br/>永久保存"]
 ```
+
+> **说明**：
+> - Session 是独立的，每次新对话都是一个新 Session
+> - Memory 跨 Session，永久保存，每次对话都会注入
 
 ### Memory 文件结构
 
@@ -729,31 +730,32 @@ flowchart TB
     end
 
     subgraph Memory["Memory - 永久保存"]
-        M["📌 用户偏好<br/>📌 项目配置<br/>📌 重要经验"]
+        M["用户偏好<br/>项目配置<br/>重要经验"]
     end
 
     subgraph Day1["第 1 天 Session"]
         S1["200 条消息"]
         C1["触发 Compaction"]
-        C1 --> S1C["摘要 + 50 条<br/>保存压缩结果"]
+        S1C["摘要 + 50 条<br/>保存压缩结果"]
+        C1 --> S1C
     end
 
     subgraph Day2["第 2 天 Session"]
         S2["恢复 Session"]
         S2R["复用已有摘要<br/>跳过压缩"]
-        S2 --> S2N["追加新消息<br/>50 条"]
+        S2N["追加新消息 50 条"]
+        S2 --> S2R
+        S2R --> S2N
     end
 
     subgraph Day3["第 3 天 Session"]
         S3["新 Session"]
-        Note["Memory 注入<br/>Session 是新的"]
     end
 
-    T1 --> Day1
-    Day1 --> C1
-    T2 --> Day2
-    Day2 --> S2R
-    T3 --> Day3
+    T1 --> S1
+    S1 --> C1
+    T2 --> S2
+    T3 --> S3
 
     M -.->|"每次注入"| Day1
     M -.->|"每次注入"| Day2
@@ -763,6 +765,8 @@ flowchart TB
     style S2R fill:#bfb
     style C1 fill:#f66
 ```
+
+> **说明**：第 3 天新 Session 时，Memory 注入但 Session 是新的。
 
 ### 完整时序图
 
